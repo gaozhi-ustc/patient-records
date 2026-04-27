@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from app.worker.rpa import visual_adapter
 from app.worker.rpa.visual_adapter import DesktopAutomation, VisualNotebookLMSession
@@ -121,3 +122,20 @@ def test_desktop_automation_falls_back_to_tk_clipboard(monkeypatch) -> None:
     automation._set_clipboard("中文路径")
 
     assert automation._get_clipboard() == "中文路径"
+
+
+def test_focus_chrome_retries_until_window_appears(monkeypatch) -> None:
+    automation = DesktopAutomation(":1")
+    attempts = []
+
+    def fake_xdotool(*args: str) -> None:
+        attempts.append(args)
+        if len(attempts) == 1:
+            raise subprocess.CalledProcessError(1, ["xdotool", *args])
+
+    monkeypatch.setattr(automation, "_xdotool", fake_xdotool)
+    monkeypatch.setattr(visual_adapter.time, "sleep", lambda seconds: None)
+
+    automation.focus_chrome(timeout_seconds=1)
+
+    assert len(attempts) == 2

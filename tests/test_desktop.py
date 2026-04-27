@@ -32,3 +32,5 @@ def test_chrome_command_uses_proxy_when_provided() -> None:
     assert "--proxy-server=http://localhost:7890" in command
     assert "--disable-gpu" in command
     assert "--no-sandbox" in command
+    assert "--disable-crash-reporter" in command
+    assert "--disable-crashpad" in command

@@ -28,8 +28,17 @@ class DesktopAutomation:
     def __init__(self, display: str) -> None:
         self.display = display
 
-    def focus_chrome(self) -> None:
-        self._xdotool("search", "--onlyvisible", "--class", "chrome", "windowactivate", "--sync")
+    def focus_chrome(self, timeout_seconds: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        last_error: subprocess.CalledProcessError | None = None
+        while time.monotonic() <= deadline:
+            try:
+                self._xdotool("search", "--onlyvisible", "--class", "chrome", "windowactivate", "--sync")
+                return
+            except subprocess.CalledProcessError as error:
+                last_error = error
+                time.sleep(0.5)
+        raise RpaError("Chrome window was not found for visual automation") from last_error
 
     def hotkey(self, *keys: str) -> None:
         self._xdotool("key", "+".join(keys))

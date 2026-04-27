@@ -33,6 +33,8 @@ class DesktopManager:
             "--disable-default-apps",
             "--disable-gpu",
             "--no-sandbox",
+            "--disable-crash-reporter",
+            "--disable-crashpad",
             "--start-maximized",
         ]
         if self.proxy_url:
@@ -49,6 +51,8 @@ class DesktopManager:
         self.chrome_user_data_dir.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         env["DISPLAY"] = self.display
+        if "XAUTHORITY" not in env and Path.home().joinpath(".Xauthority").exists():
+            env["XAUTHORITY"] = str(Path.home() / ".Xauthority")
         return subprocess.Popen(self.chrome_command(url), env=env)
 
     def _display_is_active(self) -> bool:
