@@ -91,7 +91,7 @@ class WorkerRunner:
                 current_job_id=job_id,
                 login_status="required",
             )
-            return True
+            return False
         except Exception as exc:
             self.repository.update_job_status(job_id, JobStatus.FAILED, "failed", error=str(exc))
             self.repository.add_event(job_id, self.worker_id, "failed", "error", str(exc))

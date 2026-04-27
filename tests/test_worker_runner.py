@@ -91,10 +91,11 @@ def test_process_once_sets_waiting_login(tmp_path: Path, mongo_db) -> None:
         extract_zip=False,
     )
 
-    runner.process_once()
+    processed = runner.process_once()
 
     job = repo.get_job("job-1")
     worker = repo.list_workers()[0]
+    assert processed is False
     assert job["status"] == JobStatus.WAITING_LOGIN.value
     assert job["login_required"] is True
     assert worker["status"] == WorkerStatus.WAITING_LOGIN.value
