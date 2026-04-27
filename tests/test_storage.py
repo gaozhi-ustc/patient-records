@@ -27,6 +27,19 @@ def test_job_paths_are_created_under_data_root(tmp_path: Path) -> None:
     assert paths.result_dir.is_dir()
 
 
+@pytest.mark.parametrize("job_id", ("../outside", "/tmp/outside"))
+def test_prepare_job_paths_rejects_job_ids_outside_data_root(
+    tmp_path: Path, job_id: str
+) -> None:
+    service = StorageService(data_root=tmp_path / "data")
+
+    with pytest.raises(UnsafeZipError, match="unsafe job id"):
+        service.prepare_job_paths(job_id, "patient.zip")
+
+    assert not (tmp_path / "outside").exists()
+    assert not Path("/tmp/outside").exists()
+
+
 def test_extract_zip_rejects_parent_directory_traversal(tmp_path: Path) -> None:
     zip_path = tmp_path / "bad.zip"
     write_zip(zip_path, {"../escape.txt": b"bad"})
@@ -70,6 +83,7 @@ def test_extract_zip_returns_supported_files_only(tmp_path: Path) -> None:
         "a.pdf",
         "nested/b.txt",
     ]
+    assert not (paths.input_dir / "skip.exe").exists()
 
 
 def test_sha256_file(tmp_path: Path) -> None:

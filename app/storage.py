@@ -45,7 +45,10 @@ class StorageService:
 
     def prepare_job_paths(self, job_id: str, original_filename: str) -> JobPaths:
         safe_filename = Path(original_filename).name
-        job_dir = self.data_root / job_id
+        data_root = self.data_root.resolve()
+        job_dir = (data_root / job_id).resolve()
+        if data_root != job_dir and data_root not in job_dir.parents:
+            raise UnsafeZipError(f"unsafe job id: {job_id}")
         upload_dir = job_dir / "upload"
         input_dir = job_dir / "input"
         result_dir = job_dir / "result"
@@ -70,11 +73,12 @@ class StorageService:
                 if member.is_dir():
                     continue
                 target = self._safe_target(paths.input_dir, member.filename)
+                if target.suffix.lower() not in self.supported_extensions:
+                    continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, target.open("wb") as output:
                     shutil.copyfileobj(source, output)
-                if target.suffix.lower() in self.supported_extensions:
-                    extracted.append(target)
+                extracted.append(target)
         return sorted(extracted)
 
     def _safe_target(self, input_dir: Path, member_name: str) -> Path:
