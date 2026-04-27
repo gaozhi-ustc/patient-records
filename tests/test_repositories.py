@@ -92,3 +92,21 @@ def test_worker_event_and_artifact_records(mongo_db) -> None:
     assert repo.list_workers()[0]["_id"] == "worker-1"
     assert repo.list_events("job-1")[0]["message"] == "Uploaded 2 files"
     assert repo.list_artifacts("job-1")[0]["kind"] == ArtifactKind.RESEARCH_MARKDOWN.value
+
+
+def test_get_worker_by_id(mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    repo.upsert_worker(
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=Path("/profiles/worker-1"),
+        status=WorkerStatus.IDLE,
+        automation_mode="playwright",
+    )
+
+    worker = repo.get_worker("worker-1")
+
+    assert worker is not None
+    assert worker["_id"] == "worker-1"
+    assert repo.get_worker("missing") is None

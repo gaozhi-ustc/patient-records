@@ -1,3 +1,5 @@
+import io
+import zipfile
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -10,7 +12,10 @@ from app.storage import StorageService
 
 
 def create_app(repository: MongoRepository | None = None, storage: StorageService | None = None) -> FastAPI:
-    if repository is None or storage is None:
+    if (repository is None) != (storage is None):
+        raise ValueError("repository and storage must be provided together")
+
+    if repository is None and storage is None:
         settings = Settings()
         db = create_mongo_database(settings)
         ensure_indexes(db)
@@ -23,6 +28,7 @@ def create_app(repository: MongoRepository | None = None, storage: StorageServic
     def create_job(file: UploadFile = File(...)) -> dict:
         if not file.filename or not file.filename.lower().endswith(".zip"):
             raise HTTPException(status_code=400, detail="Only .zip uploads are accepted")
+        _validate_zip(file)
         job_id = str(uuid4())
         paths = storage.prepare_job_paths(job_id, file.filename)
         storage.save_upload(file.file, paths)
@@ -36,7 +42,7 @@ def create_app(repository: MongoRepository | None = None, storage: StorageServic
             raise HTTPException(status_code=404, detail="Job not found")
         artifacts = repository.list_artifacts(job_id)
         events = repository.list_events(job_id)
-        worker = repository.db.workers.find_one({"_id": job.get("worker_id")}) if job.get("worker_id") else None
+        worker = repository.get_worker(job["worker_id"]) if job.get("worker_id") else None
         return {
             "job_id": job["_id"],
             "status": job["status"],
@@ -77,6 +83,19 @@ def create_app(repository: MongoRepository | None = None, storage: StorageServic
         ]
 
     return app
+
+
+def _validate_zip(file: UploadFile) -> None:
+    try:
+        file.file.seek(0)
+        contents = file.file.read()
+        with zipfile.ZipFile(io.BytesIO(contents)) as archive:
+            if archive.testzip() is not None:
+                raise HTTPException(status_code=400, detail="Invalid zip upload")
+    except zipfile.BadZipFile as error:
+        raise HTTPException(status_code=400, detail="Invalid zip upload") from error
+    finally:
+        file.file.seek(0)
 
 
 def _public_documents(documents: list[dict]) -> list[dict]:

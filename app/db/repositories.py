@@ -151,6 +151,9 @@ class MongoRepository:
     def list_workers(self) -> list[dict]:
         return list(self.db.workers.find().sort("heartbeat_at", ASCENDING))
 
+    def get_worker(self, worker_id: str) -> dict | None:
+        return self.db.workers.find_one({"_id": worker_id})
+
     def add_event(
         self,
         job_id: str,
