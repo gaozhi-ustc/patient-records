@@ -36,7 +36,10 @@ class WorkerRunner:
     def process_once(self) -> bool:
         current_worker = self.repository.get_worker(self.worker_id)
         if current_worker is not None and current_worker["status"] == WorkerStatus.WAITING_LOGIN.value:
-            return True
+            current_job_id = current_worker.get("current_job_id")
+            current_job = self.repository.get_job(current_job_id) if current_job_id else None
+            if current_job is not None and current_job["status"] == JobStatus.WAITING_LOGIN.value:
+                return False
         self._set_worker_idle()
         job = self.repository.claim_next_job(self.worker_id, self.display)
         if job is None:

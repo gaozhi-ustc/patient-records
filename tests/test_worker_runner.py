@@ -34,6 +34,11 @@ class LoginRequiredWorkflow:
         raise LoginRequired("login required")
 
 
+class FailingWorkflow:
+    def run(self, files: list[Path], result_dir: Path, progress=None):
+        raise RuntimeError("workflow exploded")
+
+
 def test_process_once_completes_job(tmp_path: Path, mongo_db) -> None:
     repo = MongoRepository(mongo_db)
     storage = StorageService(tmp_path, supported_extensions=(".txt",))
@@ -59,7 +64,13 @@ def test_process_once_completes_job(tmp_path: Path, mongo_db) -> None:
     assert processed is True
     assert job["status"] == JobStatus.COMPLETED.value
     assert job["notebook_id"] == "notebook-123"
-    assert len(repo.list_artifacts("job-1")) == 2
+    artifacts = repo.list_artifacts("job-1")
+    assert {artifact["kind"] for artifact in artifacts} == {"research_markdown", "slide_pdf"}
+    assert all(artifact["sha256"] for artifact in artifacts)
+    events = repo.list_events("job-1")
+    assert {"uploading_sources", "researching", "generating_ppt", "downloading_results"}.issubset(
+        {event["step"] for event in events}
+    )
 
 
 def test_process_once_sets_waiting_login(tmp_path: Path, mongo_db) -> None:
@@ -111,7 +122,7 @@ def test_process_once_preserves_waiting_login_when_no_job_is_available(tmp_path:
     processed = runner.process_once()
 
     worker = repo.list_workers()[0]
-    assert processed is True
+    assert processed is False
     assert worker["status"] == WorkerStatus.WAITING_LOGIN.value
     assert worker["current_job_id"] == "job-1"
     assert worker["login_status"] == "required"
@@ -144,8 +155,81 @@ def test_process_once_does_not_claim_new_job_while_waiting_login(tmp_path: Path,
 
     second_job = repo.get_job("job-2")
     worker = repo.list_workers()[0]
-    assert processed is True
+    assert processed is False
     assert second_job["status"] == JobStatus.QUEUED.value
     assert worker["status"] == WorkerStatus.WAITING_LOGIN.value
     assert worker["current_job_id"] == "job-1"
     assert worker["login_status"] == "required"
+
+
+def test_process_once_claims_resumed_waiting_login_job(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    storage = StorageService(tmp_path, supported_extensions=(".txt",))
+    paths = storage.prepare_job_paths("job-1", "patient.zip")
+    paths.zip_path.write_bytes(b"not-used")
+    (paths.input_dir / "record.txt").write_text("hello", encoding="utf-8")
+    repo.create_job("job-1", "patient.zip", paths.zip_path, paths.input_dir, paths.result_dir)
+    runner = WorkerRunner(
+        repository=repo,
+        storage=storage,
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=tmp_path / "profile",
+        workflow_factory=lambda: LoginRequiredWorkflow(),
+        extract_zip=False,
+    )
+
+    runner.process_once()
+    repo.resume_waiting_login_job("job-1")
+    resumed_runner = WorkerRunner(
+        repository=repo,
+        storage=storage,
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=tmp_path / "profile",
+        workflow_factory=lambda: CompletingWorkflow(),
+        extract_zip=False,
+    )
+    processed = resumed_runner.process_once()
+
+    job = repo.get_job("job-1")
+    worker = repo.list_workers()[0]
+    assert processed is True
+    assert job["status"] == JobStatus.COMPLETED.value
+    assert worker["status"] == WorkerStatus.IDLE.value
+    assert worker["current_job_id"] is None
+
+
+def test_process_once_marks_job_failed_when_workflow_raises(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    storage = StorageService(tmp_path, supported_extensions=(".txt",))
+    paths = storage.prepare_job_paths("job-1", "patient.zip")
+    paths.zip_path.write_bytes(b"not-used")
+    (paths.input_dir / "record.txt").write_text("hello", encoding="utf-8")
+    repo.create_job("job-1", "patient.zip", paths.zip_path, paths.input_dir, paths.result_dir)
+    runner = WorkerRunner(
+        repository=repo,
+        storage=storage,
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=tmp_path / "profile",
+        workflow_factory=lambda: FailingWorkflow(),
+        extract_zip=False,
+    )
+
+    processed = runner.process_once()
+
+    job = repo.get_job("job-1")
+    worker = repo.list_workers()[0]
+    failed_events = [event for event in repo.list_events("job-1") if event["step"] == "failed"]
+    assert processed is True
+    assert job["status"] == JobStatus.FAILED.value
+    assert job["error"] == "workflow exploded"
+    assert job["finished_at"] is not None
+    assert worker["status"] == WorkerStatus.IDLE.value
+    assert worker["current_job_id"] is None
+    assert failed_events
+    assert failed_events[0]["level"] == "error"
