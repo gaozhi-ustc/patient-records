@@ -18,6 +18,13 @@ def make_zip_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def make_zip_bytes_with_member(member_name: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(member_name, "hello")
+    return buffer.getvalue()
+
+
 def test_post_jobs_creates_queued_job(tmp_path: Path, mongo_db) -> None:
     repo = MongoRepository(mongo_db)
     app = create_app(repository=repo, storage=StorageService(tmp_path))
@@ -42,6 +49,21 @@ def test_post_jobs_rejects_invalid_zip_without_creating_job(tmp_path: Path, mong
     response = client.post(
         "/jobs",
         files={"file": ("patient.zip", b"not a zip", "application/zip")},
+    )
+
+    assert response.status_code == 400
+    assert mongo_db.jobs.count_documents({}) == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_post_jobs_rejects_unsafe_zip_member_without_creating_job(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    app = create_app(repository=repo, storage=StorageService(tmp_path))
+    client = TestClient(app)
+
+    response = client.post(
+        "/jobs",
+        files={"file": ("patient.zip", make_zip_bytes_with_member("../evil.txt"), "application/zip")},
     )
 
     assert response.status_code == 400

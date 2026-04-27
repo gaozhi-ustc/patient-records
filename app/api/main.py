@@ -1,5 +1,6 @@
 import io
 import zipfile
+from pathlib import PurePosixPath
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -92,10 +93,18 @@ def _validate_zip(file: UploadFile) -> None:
         with zipfile.ZipFile(io.BytesIO(contents)) as archive:
             if archive.testzip() is not None:
                 raise HTTPException(status_code=400, detail="Invalid zip upload")
+            for member in archive.infolist():
+                _validate_zip_member_name(member.filename)
     except zipfile.BadZipFile as error:
         raise HTTPException(status_code=400, detail="Invalid zip upload") from error
     finally:
         file.file.seek(0)
+
+
+def _validate_zip_member_name(member_name: str) -> None:
+    normalized = PurePosixPath(member_name.replace("\\", "/"))
+    if normalized.is_absolute() or ".." in normalized.parts:
+        raise HTTPException(status_code=400, detail="Invalid zip upload")
 
 
 def _public_documents(documents: list[dict]) -> list[dict]:
