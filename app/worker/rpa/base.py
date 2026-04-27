@@ -76,6 +76,11 @@ class NotebookLMWorkflow:
         artifacts = self.session.save_results(result_dir)
         return RpaWorkflowResult(notebook_id=notebook_id, notebook_url=notebook_url, artifacts=artifacts)
 
+    def close(self) -> None:
+        close = getattr(self.session, "close", None)
+        if callable(close):
+            close()
+
     def _notify(self, progress: Callable[[str], None] | None, step: str) -> None:
         if progress is not None:
             progress(step)

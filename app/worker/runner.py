@@ -32,6 +32,7 @@ class WorkerRunner:
         self.poll_interval_seconds = poll_interval_seconds
         self.automation_mode = automation_mode
         self.extract_zip_enabled = extract_zip
+        self._waiting_login_workflows: dict[str, NotebookLMWorkflow] = {}
 
     def process_once(self) -> bool:
         current_worker = self.repository.get_worker(self.worker_id)
@@ -54,14 +55,17 @@ class WorkerRunner:
             self.automation_mode,
             current_job_id=job_id,
         )
+        workflow: NotebookLMWorkflow | None = None
         try:
             files = self._prepare_files(job)
-            workflow = self.workflow_factory()
+            workflow = self._waiting_login_workflows.pop(job_id, None) or self.workflow_factory()
             result = workflow.run(
                 files=files,
                 result_dir=Path(job["result_dir"]),
                 progress=lambda step: self._record_progress(job_id, step),
             )
+            self._close_workflow(workflow)
+            workflow = None
             for artifact_path in result.artifacts.paths:
                 kind = ArtifactKind.SCREENSHOT
                 if artifact_path.name == "research.md":
@@ -80,6 +84,8 @@ class WorkerRunner:
             self._set_worker_idle()
             return True
         except LoginRequired as exc:
+            if workflow is not None:
+                self._waiting_login_workflows[job_id] = workflow
             self.repository.set_job_waiting_login(job_id, self.worker_id, self.display, str(exc))
             self.repository.upsert_worker(
                 self.worker_id,
@@ -93,6 +99,8 @@ class WorkerRunner:
             )
             return False
         except Exception as exc:
+            if workflow is not None:
+                self._close_workflow(workflow)
             self.repository.update_job_status(job_id, JobStatus.FAILED, "failed", error=str(exc))
             self.repository.add_event(job_id, self.worker_id, "failed", "error", str(exc))
             self._set_worker_idle()
@@ -143,3 +151,8 @@ class WorkerRunner:
             self.automation_mode,
             current_job_id=None,
         )
+
+    def _close_workflow(self, workflow: NotebookLMWorkflow) -> None:
+        close = getattr(workflow, "close", None)
+        if callable(close):
+            close()

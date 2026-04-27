@@ -34,6 +34,33 @@ class LoginRequiredWorkflow:
         raise LoginRequired("login required")
 
 
+class LoginThenCompletingWorkflow:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.closed = False
+
+    def run(self, files: list[Path], result_dir: Path, progress=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise LoginRequired("login required")
+        research = result_dir / "research.md"
+        slide = result_dir / "slide_deck.pdf"
+        research.write_text("record", encoding="utf-8")
+        slide.write_bytes(b"pdf")
+        return type(
+            "Result",
+            (),
+            {
+                "notebook_id": "notebook-123",
+                "notebook_url": "https://notebooklm.google.com/notebook/notebook-123",
+                "artifacts": RpaArtifacts(paths=[research, slide]),
+            },
+        )()
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class FailingWorkflow:
     def run(self, files: list[Path], result_dir: Path, progress=None):
         raise RuntimeError("workflow exploded")
@@ -201,6 +228,44 @@ def test_process_once_claims_resumed_waiting_login_job(tmp_path: Path, mongo_db)
     assert job["status"] == JobStatus.COMPLETED.value
     assert worker["status"] == WorkerStatus.IDLE.value
     assert worker["current_job_id"] is None
+
+
+def test_process_once_reuses_waiting_login_workflow_for_resume(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    storage = StorageService(tmp_path, supported_extensions=(".txt",))
+    paths = storage.prepare_job_paths("job-1", "patient.zip")
+    paths.zip_path.write_bytes(b"not-used")
+    (paths.input_dir / "record.txt").write_text("hello", encoding="utf-8")
+    repo.create_job("job-1", "patient.zip", paths.zip_path, paths.input_dir, paths.result_dir)
+    created_workflows: list[LoginThenCompletingWorkflow] = []
+
+    def workflow_factory() -> LoginThenCompletingWorkflow:
+        workflow = LoginThenCompletingWorkflow()
+        created_workflows.append(workflow)
+        return workflow
+
+    runner = WorkerRunner(
+        repository=repo,
+        storage=storage,
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=tmp_path / "profile",
+        workflow_factory=workflow_factory,
+        extract_zip=False,
+    )
+
+    first_processed = runner.process_once()
+    repo.resume_waiting_login_job("job-1")
+    second_processed = runner.process_once()
+
+    job = repo.get_job("job-1")
+    assert first_processed is False
+    assert second_processed is True
+    assert len(created_workflows) == 1
+    assert created_workflows[0].calls == 2
+    assert created_workflows[0].closed is True
+    assert job["status"] == JobStatus.COMPLETED.value
 
 
 def test_process_once_marks_job_failed_when_workflow_raises(tmp_path: Path, mongo_db) -> None:

@@ -56,10 +56,20 @@ class PlaywrightNotebookLMSession:
         self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
 
     def __exit__(self, exc_type, exc, traceback) -> None:
-        if self._context is not None:
-            self._context.close()
-        if self._playwright is not None:
-            self._playwright.stop()
+        self.close()
+
+    def close(self) -> None:
+        context = self._context
+        playwright = self._playwright
+        self._context = None
+        self._playwright = None
+        self.page = None
+        try:
+            if context is not None:
+                context.close()
+        finally:
+            if playwright is not None:
+                playwright.stop()
 
     def ensure_logged_in(self) -> bool:
         page = self._page()
