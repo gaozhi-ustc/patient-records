@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     ppt_timeout_seconds: int = 1800
     download_timeout_seconds: int = 600
     poll_interval_seconds: float = 2.0
+    max_upload_bytes: int = Field(100 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
+    max_zip_members: int = Field(500, alias="MAX_ZIP_MEMBERS")
+    max_uncompressed_bytes: int = Field(500 * 1024 * 1024, alias="MAX_UNCOMPRESSED_BYTES")
     supported_upload_extensions: tuple[str, ...] = (
         ".pdf",
         ".docx",

@@ -36,6 +36,7 @@ python -m app.worker.main --worker-id worker-1 --display :21
 - MongoDB server reachable through `MONGO_URI`.
 - `/DATA/patients` writable, or set `DATA_ROOT` to another writable path for uploaded zip files, extracted inputs, and job results.
 - `/DATA/notebooklm-workers` writable, or set `WORKER_ROOT` to another writable path for per-worker Chrome profiles and downloads.
+- Upload size limits can be tuned with `MAX_UPLOAD_BYTES`, `MAX_ZIP_MEMBERS`, and `MAX_UNCOMPRESSED_BYTES`.
 - Playwright Chromium installed with `python -m playwright install chromium`; this is the current worker browser runtime.
 - `vncserver` installed and on `PATH`.
 - System Google Chrome or Chromium is only needed if `DesktopManager.launch_chrome` is enabled later or for a pure desktop fallback.

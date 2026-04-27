@@ -25,6 +25,14 @@ def make_zip_bytes_with_member(member_name: str) -> bytes:
     return buffer.getvalue()
 
 
+def make_zip_bytes_with_members(count: int) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for index in range(count):
+            archive.writestr(f"record-{index}.txt", "hello")
+    return buffer.getvalue()
+
+
 def test_post_jobs_creates_queued_job(tmp_path: Path, mongo_db) -> None:
     repo = MongoRepository(mongo_db)
     app = create_app(repository=repo, storage=StorageService(tmp_path))
@@ -67,6 +75,53 @@ def test_post_jobs_rejects_unsafe_zip_member_without_creating_job(tmp_path: Path
     )
 
     assert response.status_code == 400
+    assert mongo_db.jobs.count_documents({}) == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_post_jobs_rejects_upload_larger_than_limit_without_creating_job(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    app = create_app(repository=repo, storage=StorageService(tmp_path), max_upload_bytes=10)
+    client = TestClient(app)
+
+    response = client.post(
+        "/jobs",
+        files={"file": ("patient.zip", make_zip_bytes(), "application/zip")},
+    )
+
+    assert response.status_code == 413
+    assert mongo_db.jobs.count_documents({}) == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_post_jobs_rejects_too_many_zip_members_without_creating_job(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    app = create_app(repository=repo, storage=StorageService(tmp_path), max_zip_members=1)
+    client = TestClient(app)
+
+    response = client.post(
+        "/jobs",
+        files={"file": ("patient.zip", make_zip_bytes_with_members(2), "application/zip")},
+    )
+
+    assert response.status_code == 413
+    assert mongo_db.jobs.count_documents({}) == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_post_jobs_rejects_uncompressed_zip_larger_than_limit_without_creating_job(
+    tmp_path: Path, mongo_db
+) -> None:
+    repo = MongoRepository(mongo_db)
+    app = create_app(repository=repo, storage=StorageService(tmp_path), max_uncompressed_bytes=4)
+    client = TestClient(app)
+
+    response = client.post(
+        "/jobs",
+        files={"file": ("patient.zip", make_zip_bytes(), "application/zip")},
+    )
+
+    assert response.status_code == 413
     assert mongo_db.jobs.count_documents({}) == 0
     assert list(tmp_path.iterdir()) == []
 

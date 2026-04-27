@@ -12,7 +12,14 @@ from app.domain import JobStatus
 from app.storage import StorageService
 
 
-def create_app(repository: MongoRepository | None = None, storage: StorageService | None = None) -> FastAPI:
+def create_app(
+    repository: MongoRepository | None = None,
+    storage: StorageService | None = None,
+    *,
+    max_upload_bytes: int | None = None,
+    max_zip_members: int | None = None,
+    max_uncompressed_bytes: int | None = None,
+) -> FastAPI:
     if (repository is None) != (storage is None):
         raise ValueError("repository and storage must be provided together")
 
@@ -22,6 +29,15 @@ def create_app(repository: MongoRepository | None = None, storage: StorageServic
         ensure_indexes(db)
         repository = MongoRepository(db)
         storage = StorageService(settings.data_root, settings.supported_upload_extensions)
+        max_upload_bytes = settings.max_upload_bytes if max_upload_bytes is None else max_upload_bytes
+        max_zip_members = settings.max_zip_members if max_zip_members is None else max_zip_members
+        max_uncompressed_bytes = (
+            settings.max_uncompressed_bytes if max_uncompressed_bytes is None else max_uncompressed_bytes
+        )
+    else:
+        max_upload_bytes = 100 * 1024 * 1024 if max_upload_bytes is None else max_upload_bytes
+        max_zip_members = 500 if max_zip_members is None else max_zip_members
+        max_uncompressed_bytes = 500 * 1024 * 1024 if max_uncompressed_bytes is None else max_uncompressed_bytes
 
     app = FastAPI(title="NotebookLM RPA Worker API")
 
@@ -29,7 +45,7 @@ def create_app(repository: MongoRepository | None = None, storage: StorageServic
     def create_job(file: UploadFile = File(...)) -> dict:
         if not file.filename or not file.filename.lower().endswith(".zip"):
             raise HTTPException(status_code=400, detail="Only .zip uploads are accepted")
-        _validate_zip(file)
+        _validate_zip(file, max_upload_bytes, max_zip_members, max_uncompressed_bytes)
         job_id = str(uuid4())
         paths = storage.prepare_job_paths(job_id, file.filename)
         storage.save_upload(file.file, paths)
@@ -86,19 +102,42 @@ def create_app(repository: MongoRepository | None = None, storage: StorageServic
     return app
 
 
-def _validate_zip(file: UploadFile) -> None:
+def _validate_zip(
+    file: UploadFile,
+    max_upload_bytes: int,
+    max_zip_members: int,
+    max_uncompressed_bytes: int,
+) -> None:
     try:
         file.file.seek(0)
-        contents = file.file.read()
+        contents = _read_limited_upload(file, max_upload_bytes)
         with zipfile.ZipFile(io.BytesIO(contents)) as archive:
-            if archive.testzip() is not None:
-                raise HTTPException(status_code=400, detail="Invalid zip upload")
-            for member in archive.infolist():
+            members = archive.infolist()
+            if len(members) > max_zip_members:
+                raise HTTPException(status_code=413, detail="Zip upload has too many files")
+            total_uncompressed = 0
+            for member in members:
                 _validate_zip_member_name(member.filename)
+                if member.is_dir():
+                    continue
+                total_uncompressed += member.file_size
+                if total_uncompressed > max_uncompressed_bytes:
+                    raise HTTPException(status_code=413, detail="Zip upload is too large when extracted")
     except zipfile.BadZipFile as error:
         raise HTTPException(status_code=400, detail="Invalid zip upload") from error
     finally:
         file.file.seek(0)
+
+
+def _read_limited_upload(file: UploadFile, max_upload_bytes: int) -> bytes:
+    chunks = []
+    total_size = 0
+    while chunk := file.file.read(1024 * 1024):
+        total_size += len(chunk)
+        if total_size > max_upload_bytes:
+            raise HTTPException(status_code=413, detail="Zip upload is too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _validate_zip_member_name(member_name: str) -> None:
