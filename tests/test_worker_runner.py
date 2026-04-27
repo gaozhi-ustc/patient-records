@@ -111,7 +111,41 @@ def test_process_once_preserves_waiting_login_when_no_job_is_available(tmp_path:
     processed = runner.process_once()
 
     worker = repo.list_workers()[0]
-    assert processed is False
+    assert processed is True
+    assert worker["status"] == WorkerStatus.WAITING_LOGIN.value
+    assert worker["current_job_id"] == "job-1"
+    assert worker["login_status"] == "required"
+
+
+def test_process_once_does_not_claim_new_job_while_waiting_login(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    storage = StorageService(tmp_path, supported_extensions=(".txt",))
+    first_paths = storage.prepare_job_paths("job-1", "patient.zip")
+    first_paths.zip_path.write_bytes(b"not-used")
+    (first_paths.input_dir / "record.txt").write_text("hello", encoding="utf-8")
+    repo.create_job("job-1", "patient.zip", first_paths.zip_path, first_paths.input_dir, first_paths.result_dir)
+    runner = WorkerRunner(
+        repository=repo,
+        storage=storage,
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=tmp_path / "profile",
+        workflow_factory=lambda: LoginRequiredWorkflow(),
+        extract_zip=False,
+    )
+
+    runner.process_once()
+    second_paths = storage.prepare_job_paths("job-2", "patient.zip")
+    second_paths.zip_path.write_bytes(b"not-used")
+    (second_paths.input_dir / "record.txt").write_text("hello", encoding="utf-8")
+    repo.create_job("job-2", "patient.zip", second_paths.zip_path, second_paths.input_dir, second_paths.result_dir)
+    processed = runner.process_once()
+
+    second_job = repo.get_job("job-2")
+    worker = repo.list_workers()[0]
+    assert processed is True
+    assert second_job["status"] == JobStatus.QUEUED.value
     assert worker["status"] == WorkerStatus.WAITING_LOGIN.value
     assert worker["current_job_id"] == "job-1"
     assert worker["login_status"] == "required"
