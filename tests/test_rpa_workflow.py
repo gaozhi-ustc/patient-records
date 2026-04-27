@@ -69,3 +69,5 @@ def test_workflow_raises_login_required_when_not_logged_in(tmp_path: Path) -> No
 
     with pytest.raises(LoginRequired):
         workflow.run(files=[tmp_path / "a.pdf"], result_dir=tmp_path / "result")
+
+    assert session.calls == ["ensure_logged_in"]
