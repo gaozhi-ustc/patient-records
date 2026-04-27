@@ -16,7 +16,11 @@ def test_display_to_vnc_port_derives_port_from_display_number() -> None:
     assert display_to_vnc_port(":21") == 5921
 
 
-def _run_main_with_fakes(monkeypatch, argv: list[str]) -> dict[str, object]:
+def _run_main_with_fakes(
+    monkeypatch,
+    argv: list[str],
+    settings_vnc_port: int = 5921,
+) -> dict[str, object]:
     calls: dict[str, object] = {}
     monkeypatch.delenv("DISPLAY", raising=False)
 
@@ -27,7 +31,7 @@ def _run_main_with_fakes(monkeypatch, argv: list[str]) -> dict[str, object]:
         worker_root = Path("/tmp/workers")
         worker_id = "worker-1"
         display = ":21"
-        vnc_port = 5921
+        vnc_port = settings_vnc_port
         chrome_user_data_dir = None
         automation_mode = "playwright"
         notebooklm_url = "https://notebooklm.example"
@@ -114,12 +118,12 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
 
 
 def test_main_uses_settings_vnc_port_without_cli_display(monkeypatch) -> None:
-    calls = _run_main_with_fakes(monkeypatch, ["--worker-id", "worker-2", "--once"])
+    calls = _run_main_with_fakes(monkeypatch, ["--worker-id", "worker-2", "--once"], settings_vnc_port=5999)
 
     assert calls["desktop"]["display"] == ":21"
-    assert calls["desktop"]["vnc_port"] == 5921
+    assert calls["desktop"]["vnc_port"] == 5999
     assert calls["runner"]["display"] == ":21"
-    assert calls["runner"]["vnc_port"] == 5921
+    assert calls["runner"]["vnc_port"] == 5999
     assert calls["ensure_vnc"] is True
     assert worker_main.os.environ["DISPLAY"] == ":21"
 
