@@ -63,3 +63,62 @@ def test_playwright_session_close_releases_handles(tmp_path: Path) -> None:
     assert session._context is None
     assert session._playwright is None
     assert session.page is None
+
+
+def test_download_slide_deck_saves_pdf_artifact(tmp_path: Path) -> None:
+    class FakeDownload:
+        suggested_filename = "deck.pdf"
+
+        def save_as(self, path: str) -> None:
+            Path(path).write_bytes(b"%PDF")
+
+    class FakeDownloadContext:
+        value = FakeDownload()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+    class FakeLocator:
+        def __init__(self) -> None:
+            self.clicked = False
+            self.first = self
+
+        def count(self) -> int:
+            return 1
+
+        def click(self) -> None:
+            self.clicked = True
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.locator_obj = FakeLocator()
+
+        def get_by_text(self, text: str, exact: bool = False):
+            return self.locator_obj
+
+        def get_by_label(self, text: str):
+            return self.locator_obj
+
+        def locator(self, selector: str):
+            return self.locator_obj
+
+        def expect_download(self, timeout: int):
+            return FakeDownloadContext()
+
+    page = FakePage()
+    session = PlaywrightNotebookLMSession(
+        user_data_dir=tmp_path / "profile",
+        notebooklm_url="https://notebooklm.example",
+        supported_extensions=(".pdf",),
+        downloads_dir=tmp_path / "downloads",
+    )
+    session.page = page
+
+    slide_path = session._download_slide_deck(tmp_path)
+
+    assert slide_path == tmp_path / "slide_deck.pdf"
+    assert slide_path.read_bytes() == b"%PDF"
+    assert page.locator_obj.clicked is True

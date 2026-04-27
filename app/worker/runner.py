@@ -67,11 +67,7 @@ class WorkerRunner:
             self._close_workflow(workflow)
             workflow = None
             for artifact_path in result.artifacts.paths:
-                kind = ArtifactKind.SCREENSHOT
-                if artifact_path.name == "research.md":
-                    kind = ArtifactKind.RESEARCH_MARKDOWN
-                if artifact_path.name == "slide_deck.pdf":
-                    kind = ArtifactKind.SLIDE_PDF
+                kind = self._artifact_kind(artifact_path)
                 sha256 = self.storage.sha256_file(artifact_path)
                 self.repository.add_artifact(job_id, kind, artifact_path, sha256)
             self.repository.update_job_status(
@@ -156,3 +152,12 @@ class WorkerRunner:
         close = getattr(workflow, "close", None)
         if callable(close):
             close()
+
+    def _artifact_kind(self, artifact_path: Path) -> ArtifactKind:
+        if artifact_path.name == "research.md":
+            return ArtifactKind.RESEARCH_MARKDOWN
+        if artifact_path.name == "slide_deck.pdf":
+            return ArtifactKind.SLIDE_PDF
+        if artifact_path.parent.name == "downloads":
+            return ArtifactKind.NATIVE_DOWNLOAD
+        return ArtifactKind.SCREENSHOT

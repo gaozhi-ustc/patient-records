@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.db.repositories import MongoRepository
-from app.domain import JobStatus, WorkerStatus
+from app.domain import ArtifactKind, JobStatus, WorkerStatus
 from app.storage import StorageService
 from app.worker.rpa.base import LoginRequired, RpaArtifacts
 from app.worker.runner import WorkerRunner
@@ -98,6 +98,20 @@ def test_process_once_completes_job(tmp_path: Path, mongo_db) -> None:
     assert {"uploading_sources", "researching", "generating_ppt", "downloading_results"}.issubset(
         {event["step"] for event in events}
     )
+
+
+def test_artifact_kind_classifies_native_downloads(tmp_path: Path, mongo_db) -> None:
+    runner = WorkerRunner(
+        repository=MongoRepository(mongo_db),
+        storage=StorageService(tmp_path),
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=tmp_path / "profile",
+        workflow_factory=lambda: CompletingWorkflow(),
+    )
+
+    assert runner._artifact_kind(tmp_path / "downloads" / "deck.pptx") == ArtifactKind.NATIVE_DOWNLOAD
 
 
 def test_process_once_sets_waiting_login(tmp_path: Path, mongo_db) -> None:

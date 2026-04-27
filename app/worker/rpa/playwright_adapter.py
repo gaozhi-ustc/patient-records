@@ -130,10 +130,43 @@ class PlaywrightNotebookLMSession:
         result_dir.mkdir(parents=True, exist_ok=True)
         research_path = result_dir / "research.md"
         research_path.write_text(self._page().locator("body").inner_text(), encoding="utf-8")
+        paths = [research_path]
+        slide_path = self._download_slide_deck(result_dir)
+        if slide_path is not None:
+            paths.append(slide_path)
         screenshot_path = result_dir / "screenshots" / "final.png"
         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
         self._page().screenshot(path=str(screenshot_path), full_page=True)
-        return RpaArtifacts(paths=[research_path, screenshot_path])
+        paths.append(screenshot_path)
+        return RpaArtifacts(paths=paths)
+
+    def _download_slide_deck(self, result_dir: Path) -> Path | None:
+        page = self._page()
+        candidates = (
+            lambda: page.get_by_text("下载", exact=False),
+            lambda: page.get_by_text("Download", exact=False),
+            lambda: page.get_by_label("下载"),
+            lambda: page.get_by_label("Download"),
+            lambda: page.locator('a[download], button:has-text("下载"), button:has-text("Download")'),
+        )
+        for candidate in candidates:
+            try:
+                locator = candidate()
+                if locator.count() == 0:
+                    continue
+                with page.expect_download(timeout=5_000) as download_info:
+                    locator.first.click()
+                download = download_info.value
+                suggested_name = Path(download.suggested_filename).name
+                target = result_dir / "slide_deck.pdf"
+                if suggested_name and Path(suggested_name).suffix.lower() != ".pdf":
+                    target = result_dir / "downloads" / suggested_name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                download.save_as(str(target))
+                return target
+            except Exception:
+                continue
+        return None
 
     def _page(self) -> Page:
         if self.page is None:
