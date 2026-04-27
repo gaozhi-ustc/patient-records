@@ -1,4 +1,5 @@
 import argparse
+import os
 
 from app.config import Settings
 from app.db.mongo import create_mongo_database, ensure_indexes
@@ -18,19 +19,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def display_to_vnc_port(display: str) -> int:
+    return 5900 + int(display.removeprefix(":").split(".", 1)[0])
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     settings = Settings()
     worker_id = args.worker_id or settings.worker_id
     display = args.display or settings.display
+    vnc_port = display_to_vnc_port(display) if args.display else settings.vnc_port
     chrome_user_data_dir = settings.chrome_user_data_dir or settings.worker_root / worker_id / "chrome-profile"
+    os.environ["DISPLAY"] = display
     db = create_mongo_database(settings)
     ensure_indexes(db)
     repository = MongoRepository(db)
     storage = StorageService(settings.data_root, settings.supported_upload_extensions)
-    desktop = DesktopManager(display, settings.vnc_port, chrome_user_data_dir)
+    desktop = DesktopManager(display, vnc_port, chrome_user_data_dir)
     desktop.ensure_vnc()
-    desktop.launch_chrome(settings.notebooklm_url)
 
     def workflow_factory() -> NotebookLMWorkflow:
         session = PlaywrightNotebookLMSession(
@@ -47,7 +53,7 @@ def main(argv: list[str] | None = None) -> None:
         storage=storage,
         worker_id=worker_id,
         display=display,
-        vnc_port=settings.vnc_port,
+        vnc_port=vnc_port,
         chrome_user_data_dir=chrome_user_data_dir,
         workflow_factory=workflow_factory,
         poll_interval_seconds=settings.poll_interval_seconds,

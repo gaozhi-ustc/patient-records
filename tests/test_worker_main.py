@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.worker import main as worker_main
-from app.worker.main import parse_args
+from app.worker.main import display_to_vnc_port, parse_args
 
 
 def test_parse_args_accepts_worker_id_and_display() -> None:
@@ -12,8 +12,13 @@ def test_parse_args_accepts_worker_id_and_display() -> None:
     assert args.once is True
 
 
+def test_display_to_vnc_port_derives_port_from_display_number() -> None:
+    assert display_to_vnc_port(":21") == 5921
+
+
 def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None:
     calls: dict[str, object] = {}
+    monkeypatch.delenv("DISPLAY", raising=False)
 
     class FakeSettings:
         mongo_uri = "mongodb://example.invalid:27017"
@@ -45,7 +50,7 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
             calls["ensure_vnc"] = True
 
         def launch_chrome(self, url):
-            calls["chrome_url"] = url
+            raise AssertionError("main should not launch unmanaged Chrome")
 
     class FakePlaywrightNotebookLMSession:
         def __init__(
@@ -86,10 +91,14 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
 
     expected_profile = Path("/tmp/workers/worker-2/chrome-profile")
     assert calls["desktop"]["display"] == ":22"
+    assert calls["desktop"]["vnc_port"] == 5922
     assert calls["desktop"]["chrome_user_data_dir"] == expected_profile
     assert calls["runner"]["worker_id"] == "worker-2"
     assert calls["runner"]["display"] == ":22"
+    assert calls["runner"]["vnc_port"] == 5922
     assert calls["runner"]["chrome_user_data_dir"] == expected_profile
     assert calls["session"]["user_data_dir"] == expected_profile
     assert calls["session"]["downloads_dir"] == Path("/tmp/workers/worker-2/downloads")
     assert calls["process_once"] is True
+    assert calls["ensure_vnc"] is True
+    assert worker_main.os.environ["DISPLAY"] == ":22"
