@@ -87,3 +87,31 @@ def test_process_once_sets_waiting_login(tmp_path: Path, mongo_db) -> None:
     assert job["status"] == JobStatus.WAITING_LOGIN.value
     assert job["login_required"] is True
     assert worker["status"] == WorkerStatus.WAITING_LOGIN.value
+
+
+def test_process_once_preserves_waiting_login_when_no_job_is_available(tmp_path: Path, mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    storage = StorageService(tmp_path, supported_extensions=(".txt",))
+    paths = storage.prepare_job_paths("job-1", "patient.zip")
+    paths.zip_path.write_bytes(b"not-used")
+    (paths.input_dir / "record.txt").write_text("hello", encoding="utf-8")
+    repo.create_job("job-1", "patient.zip", paths.zip_path, paths.input_dir, paths.result_dir)
+    runner = WorkerRunner(
+        repository=repo,
+        storage=storage,
+        worker_id="worker-1",
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=tmp_path / "profile",
+        workflow_factory=lambda: LoginRequiredWorkflow(),
+        extract_zip=False,
+    )
+
+    runner.process_once()
+    processed = runner.process_once()
+
+    worker = repo.list_workers()[0]
+    assert processed is False
+    assert worker["status"] == WorkerStatus.WAITING_LOGIN.value
+    assert worker["current_job_id"] == "job-1"
+    assert worker["login_status"] == "required"

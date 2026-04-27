@@ -34,14 +34,9 @@ class WorkerRunner:
         self.extract_zip_enabled = extract_zip
 
     def process_once(self) -> bool:
-        self.repository.upsert_worker(
-            self.worker_id,
-            self.display,
-            self.vnc_port,
-            self.chrome_user_data_dir,
-            WorkerStatus.IDLE,
-            self.automation_mode,
-        )
+        current_worker = self.repository.get_worker(self.worker_id)
+        if current_worker is None or current_worker["status"] != WorkerStatus.WAITING_LOGIN.value:
+            self._set_worker_idle()
         job = self.repository.claim_next_job(self.worker_id, self.display)
         if job is None:
             return False
