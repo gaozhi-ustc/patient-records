@@ -11,7 +11,7 @@ class MongoRepository:
         self.db = db
 
     def create_indexes(self) -> None:
-        self.db.jobs.create_index([("status", ASCENDING), ("created_at", ASCENDING)])
+        self.db.jobs.create_index([("status", ASCENDING), ("created_at", ASCENDING), ("_id", ASCENDING)])
         self.db.jobs.create_index([("worker_id", ASCENDING), ("status", ASCENDING)])
         self.db.jobs.create_index([("notebook_id", ASCENDING)])
         self.db.workers.create_index([("status", ASCENDING), ("heartbeat_at", ASCENDING)])
@@ -68,7 +68,7 @@ class MongoRepository:
                     "last_step": "claimed",
                 }
             },
-            sort=[("created_at", ASCENDING)],
+            sort=[("created_at", ASCENDING), ("_id", ASCENDING)],
             return_document=ReturnDocument.AFTER,
         )
 
@@ -81,7 +81,7 @@ class MongoRepository:
         extra: dict | None = None,
     ) -> dict | None:
         values = {"status": status.value, "last_step": last_step, "updated_at": utc_now(), "error": error}
-        if status == JobStatus.COMPLETED:
+        if status in {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}:
             values["finished_at"] = utc_now()
         if extra:
             values.update(extra)
@@ -106,6 +106,9 @@ class MongoRepository:
             {
                 "$set": {
                     "status": JobStatus.QUEUED.value,
+                    "worker_id": None,
+                    "display": None,
+                    "started_at": None,
                     "login_required": False,
                     "error": None,
                     "updated_at": utc_now(),

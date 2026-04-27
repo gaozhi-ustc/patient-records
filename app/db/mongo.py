@@ -9,7 +9,7 @@ def create_mongo_database(settings: Settings):
 
 
 def ensure_indexes(db) -> None:
-    db.jobs.create_index([("status", ASCENDING), ("created_at", ASCENDING)])
+    db.jobs.create_index([("status", ASCENDING), ("created_at", ASCENDING), ("_id", ASCENDING)])
     db.jobs.create_index([("worker_id", ASCENDING), ("status", ASCENDING)])
     db.jobs.create_index([("notebook_id", ASCENDING)])
     db.workers.create_index([("status", ASCENDING), ("heartbeat_at", ASCENDING)])

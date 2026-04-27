@@ -37,16 +37,43 @@ def test_claim_oldest_queued_job_is_atomic(mongo_db) -> None:
     assert repo.get_job("job-1")["status"] == JobStatus.RUNNING.value
 
 
+def test_claim_queued_job_ties_are_ordered_by_id(mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    job_b = repo.create_job("job-b", "b.zip", Path("/z-b"), Path("/i-b"), Path("/r-b"))
+    repo.create_job("job-a", "a.zip", Path("/z-a"), Path("/i-a"), Path("/r-a"))
+    mongo_db.jobs.update_many({}, {"$set": {"created_at": job_b["created_at"]}})
+
+    claimed = repo.claim_next_job(worker_id="worker-1", display=":21")
+
+    assert claimed is not None
+    assert claimed["_id"] == "job-a"
+
+
 def test_resume_waiting_login_job(mongo_db) -> None:
     repo = MongoRepository(mongo_db)
     repo.create_job("job-1", "a.zip", Path("/z"), Path("/i"), Path("/r"))
+    repo.claim_next_job("worker-1", ":21")
     repo.set_job_waiting_login("job-1", "worker-1", ":21", "login required")
 
     resumed = repo.resume_waiting_login_job("job-1")
 
     assert resumed["status"] == JobStatus.QUEUED.value
+    assert resumed["worker_id"] is None
+    assert resumed["display"] is None
+    assert resumed["started_at"] is None
     assert resumed["login_required"] is False
     assert resumed["error"] is None
+
+
+def test_failed_job_status_sets_finished_at(mongo_db) -> None:
+    repo = MongoRepository(mongo_db)
+    repo.create_job("job-1", "a.zip", Path("/z"), Path("/i"), Path("/r"))
+
+    failed = repo.update_job_status("job-1", JobStatus.FAILED, "failed", error="boom")
+
+    assert failed is not None
+    assert failed["status"] == JobStatus.FAILED.value
+    assert failed["finished_at"] is not None
 
 
 def test_worker_event_and_artifact_records(mongo_db) -> None:
