@@ -6,6 +6,8 @@ This repository contains a Python FastAPI API server and a separate Python RPA w
 
 Install dependencies:
 
+If the host does not provide a `python` command, use `python3` for the same module commands.
+
 ```bash
 python -m pip install -e ".[dev]"
 python -m playwright install chromium
@@ -34,10 +36,10 @@ python -m app.worker.main --worker-id worker-1 --display :21
 - MongoDB server reachable through `MONGO_URI`.
 - `/DATA/patients` writable, or set `DATA_ROOT` to another writable path for uploaded zip files, extracted inputs, and job results.
 - `/DATA/notebooklm-workers` writable, or set `WORKER_ROOT` to another writable path for per-worker Chrome profiles and downloads.
-- Playwright Chromium installed with `python -m playwright install chromium`.
+- Playwright Chromium installed with `python -m playwright install chromium`; this is the current worker browser runtime.
 - `vncserver` installed and on `PATH`.
-- Google Chrome or Chromium installed.
-- `xdotool` installed for hybrid desktop fallback.
+- System Google Chrome or Chromium is only needed if `DesktopManager.launch_chrome` is enabled later or for a pure desktop fallback.
+- `xdotool` is optional for hybrid desktop fallback or later pure visual automation.
 - Network access from the worker to Google NotebookLM.
 
 Copy `.env.example` to `.env` and adjust values for the host:
@@ -59,8 +61,6 @@ cp .env.example .env
    ```bash
    python -m app.worker.main --worker-id worker-1 --display :21
    ```
-
-   On hosts without a `python` command, use `python3` for the same module commands.
 
 3. Submit a patient zip to `POST /jobs`.
 
