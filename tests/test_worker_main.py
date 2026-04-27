@@ -16,7 +16,7 @@ def test_display_to_vnc_port_derives_port_from_display_number() -> None:
     assert display_to_vnc_port(":21") == 5921
 
 
-def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None:
+def _run_main_with_fakes(monkeypatch, argv: list[str]) -> dict[str, object]:
     calls: dict[str, object] = {}
     monkeypatch.delenv("DISPLAY", raising=False)
 
@@ -77,6 +77,10 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
             calls["process_once"] = True
             calls["runner"]["workflow_factory"]()
 
+        def run_forever(self):
+            calls["run_forever"] = True
+            calls["runner"]["workflow_factory"]()
+
     monkeypatch.setattr(worker_main, "Settings", FakeSettings)
     monkeypatch.setattr(worker_main, "create_mongo_database", lambda settings: "db")
     monkeypatch.setattr(worker_main, "ensure_indexes", lambda db: calls.setdefault("indexed_db", db))
@@ -87,7 +91,12 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
     monkeypatch.setattr(worker_main, "NotebookLMWorkflow", lambda session: ("workflow", session))
     monkeypatch.setattr(worker_main, "WorkerRunner", FakeWorkerRunner)
 
-    worker_main.main(["--worker-id", "worker-2", "--display", ":22", "--once"])
+    worker_main.main(argv)
+    return calls
+
+
+def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None:
+    calls = _run_main_with_fakes(monkeypatch, ["--worker-id", "worker-2", "--display", ":22", "--once"])
 
     expected_profile = Path("/tmp/workers/worker-2/chrome-profile")
     assert calls["desktop"]["display"] == ":22"
@@ -102,3 +111,22 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
     assert calls["process_once"] is True
     assert calls["ensure_vnc"] is True
     assert worker_main.os.environ["DISPLAY"] == ":22"
+
+
+def test_main_uses_settings_vnc_port_without_cli_display(monkeypatch) -> None:
+    calls = _run_main_with_fakes(monkeypatch, ["--worker-id", "worker-2", "--once"])
+
+    assert calls["desktop"]["display"] == ":21"
+    assert calls["desktop"]["vnc_port"] == 5921
+    assert calls["runner"]["display"] == ":21"
+    assert calls["runner"]["vnc_port"] == 5921
+    assert calls["ensure_vnc"] is True
+    assert worker_main.os.environ["DISPLAY"] == ":21"
+
+
+def test_main_runs_forever_without_once(monkeypatch) -> None:
+    calls = _run_main_with_fakes(monkeypatch, ["--worker-id", "worker-2"])
+
+    assert calls["run_forever"] is True
+    assert "process_once" not in calls
+    assert calls["ensure_vnc"] is True
