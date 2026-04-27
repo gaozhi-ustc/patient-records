@@ -31,12 +31,13 @@ python -m app.worker.main --worker-id worker-1 --display :21
 
 ## Runtime Requirements
 
-- MongoDB reachable at `MONGO_URI`.
-- Writable `DATA_ROOT` for uploaded zip files, extracted inputs, and job results.
-- Writable `WORKER_ROOT` for per-worker Chrome profiles and downloads.
+- MongoDB server reachable through `MONGO_URI`.
+- `/DATA/patients` writable, or set `DATA_ROOT` to another writable path for uploaded zip files, extracted inputs, and job results.
+- `/DATA/notebooklm-workers` writable, or set `WORKER_ROOT` to another writable path for per-worker Chrome profiles and downloads.
 - Playwright Chromium installed with `python -m playwright install chromium`.
-- A VNC server command available as `vncserver`.
-- Google Chrome available for the worker desktop environment when using the NotebookLM RPA workflow.
+- `vncserver` installed and on `PATH`.
+- Google Chrome or Chromium installed.
+- `xdotool` installed for hybrid desktop fallback.
 - Network access from the worker to Google NotebookLM.
 
 Copy `.env.example` to `.env` and adjust values for the host:
@@ -47,21 +48,33 @@ cp .env.example .env
 
 ## Manual Login Flow
 
-Start the API server:
+1. Start the API server:
 
-```bash
-uvicorn app.api.main:create_app --factory --host 0.0.0.0 --port 8000
-```
+   ```bash
+   uvicorn app.api.main:create_app --factory --host 0.0.0.0 --port 8000
+   ```
 
-Start a worker on its assigned display:
+2. Start a worker on its assigned display:
 
-```bash
-python -m app.worker.main --worker-id worker-1 --display :21
-```
+   ```bash
+   python -m app.worker.main --worker-id worker-1 --display :21
+   ```
 
-Connect to the worker VNC session, for example `localhost:5921` for display `:21`, and complete Google login in the browser profile for that worker. The worker profile is stored under `WORKER_ROOT/WORKER_ID/chrome-profile` unless `CHROME_USER_DATA_DIR` is set.
+   On hosts without a `python` command, use `python3` for the same module commands.
 
-If a job enters `waiting_login`, complete login in the same VNC session, then resume the job through the API.
+3. Submit a patient zip to `POST /jobs`.
+
+4. Poll `GET /jobs/{job_id}`.
+
+5. If the job status is `waiting_login`, connect to the worker VNC session, for example `localhost:5921` for display `:21`, and complete Google login manually. The worker profile is stored under `WORKER_ROOT/WORKER_ID/chrome-profile` unless `CHROME_USER_DATA_DIR` is set.
+
+6. Resume the job:
+
+   ```bash
+   curl -X POST http://localhost:8000/jobs/JOB_ID/resume
+   ```
+
+7. Continue polling `GET /jobs/{job_id}` until the job reaches `completed` or `failed`.
 
 ## API Examples
 
