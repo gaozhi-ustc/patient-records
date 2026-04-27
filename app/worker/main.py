@@ -23,17 +23,18 @@ def main(argv: list[str] | None = None) -> None:
     settings = Settings()
     worker_id = args.worker_id or settings.worker_id
     display = args.display or settings.display
+    chrome_user_data_dir = settings.chrome_user_data_dir or settings.worker_root / worker_id / "chrome-profile"
     db = create_mongo_database(settings)
     ensure_indexes(db)
     repository = MongoRepository(db)
     storage = StorageService(settings.data_root, settings.supported_upload_extensions)
-    desktop = DesktopManager(display, settings.vnc_port, settings.resolved_chrome_user_data_dir)
+    desktop = DesktopManager(display, settings.vnc_port, chrome_user_data_dir)
     desktop.ensure_vnc()
     desktop.launch_chrome(settings.notebooklm_url)
 
     def workflow_factory() -> NotebookLMWorkflow:
         session = PlaywrightNotebookLMSession(
-            user_data_dir=settings.resolved_chrome_user_data_dir,
+            user_data_dir=chrome_user_data_dir,
             notebooklm_url=settings.notebooklm_url,
             supported_extensions=settings.supported_upload_extensions,
             downloads_dir=settings.worker_root / worker_id / "downloads",
@@ -47,7 +48,7 @@ def main(argv: list[str] | None = None) -> None:
         worker_id=worker_id,
         display=display,
         vnc_port=settings.vnc_port,
-        chrome_user_data_dir=settings.resolved_chrome_user_data_dir,
+        chrome_user_data_dir=chrome_user_data_dir,
         workflow_factory=workflow_factory,
         poll_interval_seconds=settings.poll_interval_seconds,
         automation_mode=settings.automation_mode,
