@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -13,6 +14,8 @@ class DesktopManager:
         depth: str = "24",
         chrome_binary: str = "google-chrome",
         proxy_url: str | None = None,
+        downloads_dir: Path | None = None,
+        remote_debugging_port: int | None = None,
     ) -> None:
         self.display = display
         self.vnc_port = vnc_port
@@ -21,6 +24,8 @@ class DesktopManager:
         self.depth = depth
         self.chrome_binary = chrome_binary
         self.proxy_url = proxy_url
+        self.downloads_dir = downloads_dir
+        self.remote_debugging_port = remote_debugging_port
 
     def vnc_command(self) -> list[str]:
         return ["vncserver", self.display, "-geometry", self.geometry, "-depth", self.depth]
@@ -36,9 +41,17 @@ class DesktopManager:
             "--disable-crash-reporter",
             "--disable-crashpad",
             "--start-maximized",
+            "--force-renderer-accessibility",
         ]
         if self.proxy_url:
             command.append(f"--proxy-server={self.proxy_url}")
+        if self.remote_debugging_port is not None:
+            command.extend(
+                [
+                    "--remote-debugging-address=127.0.0.1",
+                    f"--remote-debugging-port={self.remote_debugging_port}",
+                ]
+            )
         command.append(url)
         return command
 
@@ -49,11 +62,36 @@ class DesktopManager:
 
     def launch_chrome(self, url: str) -> subprocess.Popen:
         self.chrome_user_data_dir.mkdir(parents=True, exist_ok=True)
+        self._configure_download_directory()
         env = os.environ.copy()
         env["DISPLAY"] = self.display
         if "XAUTHORITY" not in env and Path.home().joinpath(".Xauthority").exists():
             env["XAUTHORITY"] = str(Path.home() / ".Xauthority")
         return subprocess.Popen(self.chrome_command(url), env=env)
+
+    def _configure_download_directory(self) -> None:
+        if self.downloads_dir is None:
+            return
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
+        preferences_path = self.chrome_user_data_dir / "Default" / "Preferences"
+        preferences_path.parent.mkdir(parents=True, exist_ok=True)
+        preferences = {}
+        if preferences_path.exists():
+            try:
+                preferences = json.loads(preferences_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                preferences = {}
+        preferences.setdefault("download", {}).update(
+            {
+                "default_directory": str(self.downloads_dir),
+                "directory_upgrade": True,
+                "prompt_for_download": False,
+            }
+        )
+        preferences.setdefault("profile", {}).setdefault("default_content_setting_values", {})[
+            "automatic_downloads"
+        ] = 1
+        preferences_path.write_text(json.dumps(preferences, ensure_ascii=False), encoding="utf-8")
 
     def _display_is_active(self) -> bool:
         return subprocess.run(

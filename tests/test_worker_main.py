@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.worker import main as worker_main
-from app.worker.main import display_to_vnc_port, parse_args
+from app.worker.main import display_to_remote_debugging_port, display_to_vnc_port, parse_args
 
 
 def test_parse_args_accepts_worker_id_and_display() -> None:
@@ -14,6 +14,10 @@ def test_parse_args_accepts_worker_id_and_display() -> None:
 
 def test_display_to_vnc_port_derives_port_from_display_number() -> None:
     assert display_to_vnc_port(":21") == 5921
+
+
+def test_display_to_remote_debugging_port_derives_port_from_display_number() -> None:
+    assert display_to_remote_debugging_port(":21") == 9241
 
 
 def _run_main_with_fakes(
@@ -35,6 +39,7 @@ def _run_main_with_fakes(
         display = ":21"
         vnc_port = settings_vnc_port
         chrome_user_data_dir = None
+        chrome_remote_debugging_port = None
         automation_mode = fake_automation_mode
         notebooklm_url = "https://notebooklm.example"
         poll_interval_seconds = 2.0
@@ -45,12 +50,22 @@ def _run_main_with_fakes(
             return self.worker_root / self.worker_id / "chrome-profile"
 
     class FakeDesktopManager:
-        def __init__(self, display, vnc_port, chrome_user_data_dir, proxy_url=None):
+        def __init__(
+            self,
+            display,
+            vnc_port,
+            chrome_user_data_dir,
+            proxy_url=None,
+            downloads_dir=None,
+            remote_debugging_port=None,
+        ):
             calls["desktop"] = {
                 "display": display,
                 "vnc_port": vnc_port,
                 "chrome_user_data_dir": chrome_user_data_dir,
                 "proxy_url": proxy_url,
+                "downloads_dir": downloads_dir,
+                "remote_debugging_port": remote_debugging_port,
             }
 
         def ensure_vnc(self):
@@ -83,12 +98,14 @@ def _run_main_with_fakes(
             screenshots_dir,
             downloads_dir,
             notebooklm_url,
+            remote_debugging_port,
         ):
             calls["visual_session"] = {
                 "display": display,
                 "screenshots_dir": screenshots_dir,
                 "downloads_dir": downloads_dir,
                 "notebooklm_url": notebooklm_url,
+                "remote_debugging_port": remote_debugging_port,
             }
 
     class FakeWorkerRunner:
@@ -125,6 +142,7 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
     assert calls["desktop"]["display"] == ":22"
     assert calls["desktop"]["vnc_port"] == 5922
     assert calls["desktop"]["chrome_user_data_dir"] == expected_profile
+    assert calls["desktop"]["downloads_dir"] == Path("/tmp/workers/worker-2/downloads")
     assert calls["runner"]["worker_id"] == "worker-2"
     assert calls["runner"]["display"] == ":22"
     assert calls["runner"]["vnc_port"] == 5922
@@ -167,4 +185,6 @@ def test_main_visual_mode_launches_chrome_and_uses_visual_session(monkeypatch) -
     assert calls["visual_session"]["display"] == ":22"
     assert calls["visual_session"]["screenshots_dir"] == Path("/tmp/workers/worker-2/screenshots")
     assert calls["visual_session"]["downloads_dir"] == Path("/tmp/workers/worker-2/downloads")
+    assert calls["desktop"]["remote_debugging_port"] == 9242
+    assert calls["visual_session"]["remote_debugging_port"] == 9242
     assert "session" not in calls

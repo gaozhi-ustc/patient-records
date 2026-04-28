@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 from app.worker.desktop import DesktopManager
 
@@ -16,6 +17,7 @@ def test_chrome_command_uses_profile_and_notebook_url() -> None:
 
     assert "--user-data-dir=/profiles/w1" in command
     assert "--no-first-run" in command
+    assert "--force-renderer-accessibility" in command
     assert "https://notebooklm.google.com" == command[-1]
 
 
@@ -25,12 +27,41 @@ def test_chrome_command_uses_proxy_when_provided() -> None:
         vnc_port=5921,
         chrome_user_data_dir=Path("/profiles/w1"),
         proxy_url="http://localhost:7890",
+        remote_debugging_port=9241,
     )
 
     command = manager.chrome_command("https://notebooklm.google.com")
 
     assert "--proxy-server=http://localhost:7890" in command
+    assert "--remote-debugging-address=127.0.0.1" in command
+    assert "--remote-debugging-port=9241" in command
     assert "--disable-gpu" in command
     assert "--no-sandbox" in command
     assert "--disable-crash-reporter" in command
     assert "--disable-crashpad" in command
+
+
+def test_launch_chrome_configures_download_directory(tmp_path: Path, monkeypatch) -> None:
+    profile = tmp_path / "profile"
+    downloads = tmp_path / "downloads"
+    launched = {}
+    manager = DesktopManager(
+        display=":21",
+        vnc_port=5921,
+        chrome_user_data_dir=profile,
+        downloads_dir=downloads,
+    )
+
+    def fake_popen(command, env):
+        launched["command"] = command
+        launched["env"] = env
+        return "process"
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    process = manager.launch_chrome("https://notebooklm.google.com")
+
+    assert process == "process"
+    preferences = (profile / "Default" / "Preferences").read_text(encoding="utf-8")
+    assert str(downloads) in preferences
+    assert downloads.is_dir()

@@ -158,6 +158,6 @@ class WorkerRunner:
             return ArtifactKind.RESEARCH_MARKDOWN
         if artifact_path.name == "slide_deck.pdf":
             return ArtifactKind.SLIDE_PDF
-        if artifact_path.parent.name == "downloads":
+        if artifact_path.parent.name == "downloads" or artifact_path.suffix.lower() in {".pptx", ".pdf"}:
             return ArtifactKind.NATIVE_DOWNLOAD
         return ArtifactKind.SCREENSHOT

@@ -24,6 +24,10 @@ def display_to_vnc_port(display: str) -> int:
     return 5900 + int(display.removeprefix(":").split(".", 1)[0])
 
 
+def display_to_remote_debugging_port(display: str) -> int:
+    return 9220 + int(display.removeprefix(":").split(".", 1)[0])
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     settings = Settings()
@@ -33,6 +37,7 @@ def main(argv: list[str] | None = None) -> None:
     automation_mode = settings.automation_mode.lower()
     chrome_user_data_dir = settings.chrome_user_data_dir or settings.worker_root / worker_id / "chrome-profile"
     downloads_dir = settings.worker_root / worker_id / "downloads"
+    remote_debugging_port = settings.chrome_remote_debugging_port or display_to_remote_debugging_port(display)
     proxy_url = (
         os.environ.get("all_proxy")
         or os.environ.get("http_proxy")
@@ -46,7 +51,14 @@ def main(argv: list[str] | None = None) -> None:
     ensure_indexes(db)
     repository = MongoRepository(db)
     storage = StorageService(settings.data_root, settings.supported_upload_extensions)
-    desktop = DesktopManager(display, vnc_port, chrome_user_data_dir, proxy_url=proxy_url)
+    desktop = DesktopManager(
+        display,
+        vnc_port,
+        chrome_user_data_dir,
+        proxy_url=proxy_url,
+        downloads_dir=downloads_dir,
+        remote_debugging_port=remote_debugging_port if automation_mode == "visual" else None,
+    )
     desktop.ensure_vnc()
     if automation_mode == "visual":
         desktop.launch_chrome(settings.notebooklm_url)
@@ -58,6 +70,7 @@ def main(argv: list[str] | None = None) -> None:
                 screenshots_dir=settings.worker_root / worker_id / "screenshots",
                 downloads_dir=downloads_dir,
                 notebooklm_url=settings.notebooklm_url,
+                remote_debugging_port=remote_debugging_port,
             )
         else:
             session = PlaywrightNotebookLMSession(

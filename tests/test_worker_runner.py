@@ -112,6 +112,7 @@ def test_artifact_kind_classifies_native_downloads(tmp_path: Path, mongo_db) -> 
     )
 
     assert runner._artifact_kind(tmp_path / "downloads" / "deck.pptx") == ArtifactKind.NATIVE_DOWNLOAD
+    assert runner._artifact_kind(tmp_path / "results" / "deck.pptx") == ArtifactKind.NATIVE_DOWNLOAD
 
 
 def test_process_once_sets_waiting_login(tmp_path: Path, mongo_db) -> None:

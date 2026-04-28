@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     display: str = Field(":21", alias="DISPLAY")
     vnc_port: int = Field(5921, alias="VNC_PORT")
     chrome_user_data_dir: Path | None = Field(None, alias="CHROME_USER_DATA_DIR")
+    chrome_remote_debugging_port: int | None = Field(None, alias="CHROME_REMOTE_DEBUGGING_PORT")
     automation_mode: str = Field("playwright", alias="AUTOMATION_MODE")
     notebooklm_url: str = "https://notebooklm.google.com"
     page_load_timeout_seconds: int = 120
