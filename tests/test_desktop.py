@@ -7,7 +7,36 @@ from app.worker.desktop import DesktopManager
 def test_vnc_command_uses_display_and_geometry() -> None:
     manager = DesktopManager(display=":21", vnc_port=5921, chrome_user_data_dir=Path("/profiles/w1"))
 
-    assert manager.vnc_command() == ["vncserver", ":21", "-geometry", "1600x1000", "-depth", "24"]
+    assert manager.vnc_command() == [
+        "vncserver",
+        ":21",
+        "-localhost",
+        "yes",
+        "-geometry",
+        "1920x1200",
+        "-depth",
+        "24",
+    ]
+
+
+def test_vnc_command_can_disable_localhost_binding() -> None:
+    manager = DesktopManager(
+        display=":20",
+        vnc_port=5920,
+        chrome_user_data_dir=Path("/profiles/w20"),
+        vnc_localhost=False,
+    )
+
+    assert manager.vnc_command() == [
+        "vncserver",
+        ":20",
+        "-localhost",
+        "no",
+        "-geometry",
+        "1920x1200",
+        "-depth",
+        "24",
+    ]
 
 
 def test_chrome_command_uses_profile_and_notebook_url() -> None:
@@ -18,6 +47,9 @@ def test_chrome_command_uses_profile_and_notebook_url() -> None:
     assert "--user-data-dir=/profiles/w1" in command
     assert "--no-first-run" in command
     assert "--force-renderer-accessibility" in command
+    assert "--start-fullscreen" in command
+    assert "--window-position=0,0" in command
+    assert "--window-size=1920,1200" in command
     assert "https://notebooklm.google.com" == command[-1]
 
 

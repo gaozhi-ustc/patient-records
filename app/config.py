@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     worker_id: str = Field("worker-1", alias="WORKER_ID")
     display: str = Field(":21", alias="DISPLAY")
     vnc_port: int = Field(5921, alias="VNC_PORT")
+    vnc_localhost: bool = Field(True, alias="VNC_LOCALHOST")
     chrome_user_data_dir: Path | None = Field(None, alias="CHROME_USER_DATA_DIR")
     chrome_remote_debugging_port: int | None = Field(None, alias="CHROME_REMOTE_DEBUGGING_PORT")
     automation_mode: str = Field("playwright", alias="AUTOMATION_MODE")

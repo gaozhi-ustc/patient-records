@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> None:
         proxy_url=proxy_url,
         downloads_dir=downloads_dir,
         remote_debugging_port=remote_debugging_port if automation_mode == "visual" else None,
+        vnc_localhost=settings.vnc_localhost,
     )
     desktop.ensure_vnc()
     if automation_mode == "visual":

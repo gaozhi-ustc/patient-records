@@ -12,7 +12,9 @@ def test_settings_defaults_are_mvp_safe(monkeypatch) -> None:
         "WORKER_ID",
         "DISPLAY",
         "VNC_PORT",
+        "VNC_LOCALHOST",
         "AUTOMATION_MODE",
+        "NOTEBOOKLM_URL",
         "MAX_UPLOAD_BYTES",
         "MAX_ZIP_MEMBERS",
         "MAX_UNCOMPRESSED_BYTES",
@@ -27,7 +29,9 @@ def test_settings_defaults_are_mvp_safe(monkeypatch) -> None:
     assert settings.worker_id == "worker-1"
     assert settings.display == ":21"
     assert settings.vnc_port == 5921
+    assert settings.vnc_localhost is True
     assert settings.automation_mode == "playwright"
+    assert settings.notebooklm_url == "https://notebooklm.google.com"
     assert settings.max_upload_bytes == 100 * 1024 * 1024
     assert settings.max_zip_members == 500
     assert settings.max_uncompressed_bytes == 500 * 1024 * 1024
@@ -39,6 +43,14 @@ def test_domain_status_and_artifact_values_are_stable() -> None:
     assert JobStatus.GENERATING_PPT.value == "generating_ppt"
     assert ArtifactKind.RESEARCH_MARKDOWN.value == "research_markdown"
     assert ArtifactKind.SLIDE_PDF.value == "slide_pdf"
+
+
+def test_settings_accepts_notebooklm_url_env_alias(monkeypatch) -> None:
+    monkeypatch.setenv("NOTEBOOKLM_URL", "https://notebooklm.example")
+
+    settings = Settings(mongo_uri="mongodb://localhost:27017", _env_file=None)
+
+    assert settings.notebooklm_url == "https://notebooklm.example"
 
 
 def test_deep_research_prompt_is_exact() -> None:

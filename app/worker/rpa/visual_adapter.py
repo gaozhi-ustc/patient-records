@@ -410,22 +410,20 @@ def _research_result_is_ready(visible_text: str) -> bool:
         return True
     if CLINIC_RECORD_ANSWER_MARKER in visible_text:
         return True
-    if "回复已就绪" in visible_text and "门诊记录单" in visible_text:
-        return True
     return re.search(
-        r"(一份为您[^\n]{0,80}纯净版门诊记录单|已为您整理出一份[^\n]{0,120}门诊记录单|纯净版门诊记录单[：:]\s*\n\s*门诊记录单)",
+        r"(一份为您[^\n]{0,80}纯净版门诊记录单|为您梳理的[^\n]{0,80}纯净版门诊记录单|已为您整理出一份[^\n]{0,120}门诊记录单|纯净版门诊记录单(?:如下)?[：:]\s*\n\s*门诊记录单)",
         visible_text,
     ) is not None
 
 
 @dataclass(frozen=True)
 class VisualCoordinates:
-    create_notebook_primary: tuple[int, int] = (1538, 143)
-    create_notebook_fallback: tuple[int, int] = (1684, 198)
+    create_notebook_primary: tuple[int, int] = (1674, 147)
+    create_notebook_fallback: tuple[int, int] = (1600, 30)
     recent_untitled_notebook: tuple[int, int] = (300, 724)
-    chrome_restore_close: tuple[int, int] = (1890, 144)
+    chrome_restore_close: tuple[int, int] = (1890, 24)
     sources_tab: tuple[int, int] = (50, 207)
-    add_source: tuple[int, int] = (252, 320)
+    add_source: tuple[int, int] = (252, 186)
     add_source_research_dropdown: tuple[int, int] = (878, 600)
     add_source_deep_research: tuple[int, int] = (872, 665)
     upload_source: tuple[int, int] = (805, 791)
@@ -459,7 +457,7 @@ class DesktopAutomation:
         last_error: subprocess.CalledProcessError | None = None
         while time.monotonic() <= deadline:
             try:
-                self._xdotool("search", "--onlyvisible", "--class", "chrome", "windowactivate", "--sync")
+                self._focus_window_by_search("--class", "chrome")
                 return
             except subprocess.CalledProcessError as error:
                 last_error = error
@@ -471,12 +469,38 @@ class DesktopAutomation:
         last_error: subprocess.CalledProcessError | None = None
         while time.monotonic() <= deadline:
             try:
-                self._xdotool("search", "--onlyvisible", "--name", name, "windowactivate", "--sync")
+                self._focus_window_by_search("--name", name)
                 return
             except subprocess.CalledProcessError as error:
                 last_error = error
                 time.sleep(0.5)
         raise RpaError(f"Window was not found for visual automation: {name}") from last_error
+
+    def _focus_window_by_search(self, *search_args: str) -> None:
+        try:
+            self._xdotool("search", "--onlyvisible", *search_args, "windowactivate", "--sync")
+            return
+        except subprocess.CalledProcessError:
+            window_ids = [
+                window_id
+                for window_id in self._xdotool_output("search", "--onlyvisible", *search_args).splitlines()
+                if window_id.strip()
+            ]
+            if not window_ids:
+                raise
+            last_error: subprocess.CalledProcessError | None = None
+            for window_id in window_ids:
+                try:
+                    self._xdotool("windowmove", window_id, "0", "0")
+                    self._xdotool("windowsize", window_id, "1920", "1200")
+                    self._xdotool("windowraise", window_id)
+                    self._xdotool("windowfocus", window_id)
+                    return
+                except subprocess.CalledProcessError as error:
+                    last_error = error
+            if last_error is not None:
+                raise last_error
+            raise
 
     def hotkey(self, *keys: str) -> None:
         self._xdotool("key", "+".join(keys))
@@ -490,6 +514,80 @@ class DesktopAutomation:
     def paste_text(self, text: str) -> None:
         self._set_clipboard(text)
         self.hotkey("ctrl", "v")
+
+    def upload_files(self, files: list[Path]) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct file upload")
+        target = self._find_cdp_target()
+        websocket_url = target["webSocketDebuggerUrl"]
+        paths = [str(path.resolve()) for path in files]
+        try:
+            self._upload_files_with_file_chooser_intercept(websocket_url, paths)
+            return
+        except RpaError:
+            pass
+        file_input = self._find_cdp_file_input(websocket_url)
+        self._cdp_call(websocket_url, "DOM.setFileInputFiles", {"objectId": file_input, "files": paths})
+        self._cdp_call(
+            websocket_url,
+            "Runtime.callFunctionOn",
+            {
+                "objectId": file_input,
+                "functionDeclaration": (
+                    "function() {"
+                    "this.dispatchEvent(new Event('input', { bubbles: true }));"
+                    "this.dispatchEvent(new Event('change', { bubbles: true }));"
+                    "}"
+                ),
+            },
+        )
+
+    def select_deep_research(self) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct Deep Research selection")
+        target = self._find_cdp_target()
+        websocket_url = target["webSocketDebuggerUrl"]
+        self._click_cdp_text(websocket_url, "Fast Research")
+        last_error: RpaError | None = None
+        for _ in range(10):
+            try:
+                self._click_cdp_text(websocket_url, "Deep Research")
+                return
+            except RpaError as error:
+                last_error = error
+                time.sleep(0.2)
+        if last_error is not None:
+            raise last_error
+        raise RpaError("Chrome DevTools text target was not found: Deep Research")
+
+    def submit_chat_prompt(self, prompt: str) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct chat prompt submit")
+        target = self._find_cdp_target()
+        response = self._cdp_call(
+            target["webSocketDebuggerUrl"],
+            "Runtime.evaluate",
+            {
+                "expression": self._submit_chat_prompt_expression(prompt),
+                "userGesture": True,
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+        value = response.get("result", {}).get("result", {}).get("value")
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            reason = value.get("reason") if isinstance(value, dict) else "unknown error"
+            raise RpaError(f"Chrome DevTools chat prompt submit failed: {reason}")
+
+    def get_current_url(self) -> str:
+        if self.remote_debugging_port is not None:
+            target = self._find_cdp_target()
+            url = target.get("url")
+            if isinstance(url, str) and url:
+                return url
+        self.focus_chrome()
+        self.hotkey("ctrl", "l")
+        return self.copy_selection()
 
     def copy_selection(self) -> str:
         self.hotkey("ctrl", "c")
@@ -539,6 +637,209 @@ class DesktopAutomation:
         if not isinstance(text, str) or not text.strip():
             raise RpaError("Chrome DevTools did not expose page text")
         return text
+
+    def _upload_files_with_file_chooser_intercept(self, websocket_url: str, files: list[str]) -> None:
+        parsed = urlparse(websocket_url)
+        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        if parsed.scheme == "wss":
+            raise RpaError("Secure Chrome DevTools WebSocket is not supported")
+        sock = socket.create_connection((parsed.hostname or "127.0.0.1", port), timeout=5)
+        try:
+            self._websocket_handshake(sock, parsed)
+            self._send_cdp_command(sock, "Page.enable")
+            self._send_cdp_command(sock, "Page.setInterceptFileChooserDialog", {"enabled": True})
+            click_request_id = self._websocket_send_cdp_command(
+                sock,
+                "Runtime.evaluate",
+                {
+                    "expression": self._upload_file_button_click_expression(),
+                    "userGesture": True,
+                    "returnByValue": True,
+                },
+            )
+            backend_node_id = self._wait_for_file_chooser_backend_node(sock, click_request_id)
+            self._send_cdp_command(
+                sock,
+                "DOM.setFileInputFiles",
+                {"backendNodeId": backend_node_id, "files": files},
+            )
+        finally:
+            sock.close()
+
+    def _upload_file_button_click_expression(self) -> str:
+        return (
+            "(() => {"
+            "const buttons = Array.from(document.querySelectorAll('button, [role=\"button\"]'));"
+            "const button = buttons.find((element) => "
+            "(element.innerText || element.textContent || '').includes('上传文件')"
+            ");"
+            "if (!button) return false;"
+            "button.click();"
+            "return true;"
+            "})()"
+        )
+
+    def _submit_chat_prompt_expression(self, prompt: str) -> str:
+        return (
+            "(async () => {"
+            "const prompt = "
+            + json.dumps(prompt)
+            + ";"
+            "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));"
+            "const visible = (element) => {"
+            "const rect = element.getBoundingClientRect();"
+            "return rect.width > 0 && rect.height > 0;"
+            "};"
+            "const textareas = Array.from(document.querySelectorAll('textarea'));"
+            "const textarea = textareas.find((element) => {"
+            "const aria = element.getAttribute('aria-label') || '';"
+            "const placeholder = element.getAttribute('placeholder') || '';"
+            "const className = String(element.className || '');"
+            "return visible(element) && "
+            "(aria.includes('查询框') || placeholder.includes('开始输入') || className.includes('query-box-input'));"
+            "}) || textareas.filter(visible).sort((left, right) => "
+            "right.getBoundingClientRect().y - left.getBoundingClientRect().y"
+            ")[0];"
+            "if (!textarea) return { ok: false, reason: 'chat textarea was not found' };"
+            "textarea.focus();"
+            "const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;"
+            "if (setter) setter.call(textarea, prompt);"
+            "else textarea.value = prompt;"
+            "textarea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: prompt }));"
+            "textarea.dispatchEvent(new Event('change', { bubbles: true }));"
+            "await sleep(150);"
+            "const enabled = (element) => !element.disabled && element.getAttribute('aria-disabled') !== 'true';"
+            "const root = textarea.closest('.query-box, .omnibar-container, .input-group, .bottom-container') || document;"
+            "let buttons = Array.from(root.querySelectorAll('button')).filter((element) => visible(element) && enabled(element));"
+            "let button = buttons.find((element) => "
+            "(element.innerText || element.textContent || '').includes('arrow_forward')"
+            ");"
+            "if (!button) {"
+            "const textareaRect = textarea.getBoundingClientRect();"
+            "button = Array.from(document.querySelectorAll('button')).filter((element) => {"
+            "const rect = element.getBoundingClientRect();"
+            "return visible(element) && enabled(element) && "
+            "rect.y >= textareaRect.y - 40 && rect.y <= textareaRect.y + 80 && rect.x >= textareaRect.right;"
+            "}).sort((left, right) => left.getBoundingClientRect().x - right.getBoundingClientRect().x)[0];"
+            "}"
+            "if (!button) return { ok: false, reason: 'chat submit button was not found', value: textarea.value };"
+            "button.click();"
+            "return { ok: true, submitted: 'button', value: textarea.value };"
+            "})()"
+        )
+
+    def _click_cdp_text(self, websocket_url: str, text: str) -> None:
+        response = self._cdp_call(
+            websocket_url,
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "((targetText) => {"
+                    "const elements = Array.from(document.querySelectorAll("
+                    "'button, [role=\"button\"], [role=\"menuitem\"], mat-option'"
+                    "));"
+                    "const matches = elements.filter((candidate) => "
+                    "(candidate.innerText || candidate.textContent || '').trim().includes(targetText)"
+                    ");"
+                    "const element = matches.sort((left, right) => {"
+                    "const leftRect = left.getBoundingClientRect();"
+                    "const rightRect = right.getBoundingClientRect();"
+                    "return (leftRect.width * leftRect.height) - (rightRect.width * rightRect.height);"
+                    "})[0];"
+                    "if (!element) return false;"
+                    "element.click();"
+                    "return true;"
+                    "})("
+                    + json.dumps(text)
+                    + ")"
+                ),
+                "userGesture": True,
+                "returnByValue": True,
+            },
+        )
+        clicked = response.get("result", {}).get("result", {}).get("value")
+        if clicked is not True:
+            raise RpaError(f"Chrome DevTools text target was not found: {text}")
+
+    def _send_cdp_command(self, sock: socket.socket, method: str, params: dict | None = None) -> dict:
+        request_id = self._websocket_send_cdp_command(sock, method, params)
+        return self._wait_for_cdp_response(sock, request_id, method)
+
+    def _websocket_send_cdp_command(self, sock: socket.socket, method: str, params: dict | None = None) -> int:
+        request_id = next(self._cdp_ids)
+        self._websocket_send_json(
+            sock,
+            {
+                "id": request_id,
+                "method": method,
+                "params": params or {},
+            },
+        )
+        return request_id
+
+    def _wait_for_cdp_response(self, sock: socket.socket, request_id: int, method: str) -> dict:
+        deadline = time.monotonic() + 10
+        while time.monotonic() <= deadline:
+            try:
+                message = self._websocket_recv_json(sock)
+            except socket.timeout:
+                continue
+            if message.get("id") != request_id:
+                continue
+            if "error" in message:
+                raise RpaError(f"Chrome DevTools call failed: {message['error']}")
+            return message
+        raise RpaError(f"Chrome DevTools call timed out: {method}")
+
+    def _wait_for_file_chooser_backend_node(self, sock: socket.socket, click_request_id: int) -> int:
+        deadline = time.monotonic() + 10
+        click_succeeded = False
+        while time.monotonic() <= deadline:
+            try:
+                message = self._websocket_recv_json(sock)
+            except socket.timeout:
+                continue
+            if message.get("id") == click_request_id:
+                if "error" in message:
+                    raise RpaError(f"Chrome DevTools call failed: {message['error']}")
+                value = message.get("result", {}).get("result", {}).get("value")
+                click_succeeded = value is not False
+            if message.get("method") == "Page.fileChooserOpened":
+                backend_node_id = message.get("params", {}).get("backendNodeId")
+                if isinstance(backend_node_id, int):
+                    return backend_node_id
+        if not click_succeeded:
+            raise RpaError("NotebookLM upload file button was not found")
+        raise RpaError("Chrome DevTools file chooser event was not received")
+
+    def _find_cdp_file_input(self, websocket_url: str) -> str:
+        response = self._cdp_call(
+            websocket_url,
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(() => {"
+                    "const inputs = [];"
+                    "const visit = (root) => {"
+                    "if (!root || !root.querySelectorAll) return;"
+                    "for (const input of root.querySelectorAll('input[type=\"file\"]')) {"
+                    "if (!input.disabled) inputs.push(input);"
+                    "}"
+                    "for (const element of root.querySelectorAll('*')) {"
+                    "if (element.shadowRoot) visit(element.shadowRoot);"
+                    "}"
+                    "};"
+                    "visit(document);"
+                    "return inputs[inputs.length - 1] || null;"
+                    "})()"
+                ),
+            },
+        )
+        result = response.get("result", {}).get("result", {})
+        object_id = result.get("objectId")
+        if not isinstance(object_id, str) or not object_id:
+            raise RpaError("Chrome DevTools file input was not found")
+        return object_id
 
     def _find_cdp_target(self) -> dict:
         opener = build_opener(ProxyHandler({}))
@@ -596,7 +897,10 @@ class DesktopAutomation:
             )
             deadline = time.monotonic() + 10
             while time.monotonic() <= deadline:
-                message = self._websocket_recv_json(sock)
+                try:
+                    message = self._websocket_recv_json(sock)
+                except socket.timeout:
+                    continue
                 if message.get("id") == request_id:
                     if "error" in message:
                         raise RpaError(f"Chrome DevTools call failed: {message['error']}")
@@ -709,7 +1013,12 @@ class DesktopAutomation:
     def _xdotool(self, *args: str) -> None:
         if shutil.which("xdotool") is None:
             raise RpaError("xdotool is required for visual automation")
-        subprocess.run(["xdotool", *args], check=True, env={"DISPLAY": self.display})
+        subprocess.run(["xdotool", *args], check=True, env={**os.environ, "DISPLAY": self.display})
+
+    def _xdotool_output(self, *args: str) -> str:
+        if shutil.which("xdotool") is None:
+            raise RpaError("xdotool is required for visual automation")
+        return subprocess.check_output(["xdotool", *args], text=True, env={**os.environ, "DISPLAY": self.display})
 
     def _set_clipboard(self, text: str) -> None:
         if shutil.which("xclip") is not None:
@@ -802,19 +1111,25 @@ class VisualNotebookLMSession:
     def create_new_notebook(self) -> tuple[str, str]:
         last_error: RpaError | None = None
         for _ in range(3):
-            self._open_url(self.notebooklm_url)
-            current_url = self.notebooklm_url
             try:
-                self._wait_for_home_page()
                 current_url = self._copy_current_url()
+                create_button = self.coordinates.create_notebook_fallback
+                if not self._is_existing_notebook_url(current_url):
+                    self._open_url(self.notebooklm_url)
+                    self._wait_for_home_page()
+                    current_url = self._copy_current_url()
+                    create_button = (
+                        self.coordinates.create_notebook_fallback
+                        if self._is_existing_notebook_url(current_url)
+                        else self.coordinates.create_notebook_primary
+                    )
                 self.automation.press("Escape")
-                self._click(self.coordinates.chrome_restore_close)
                 self.automation.press("Escape")
                 self._sleep()
-                self._click(self.coordinates.create_notebook_fallback)
+                self._click(create_button)
                 self.automation.press("Escape")
                 self._sleep()
-                notebook_url = self._wait_for_notebook_url(ignored_url=current_url)
+                notebook_url = self._wait_for_notebook_url(timeout_seconds=60.0, ignored_url=current_url)
                 self._wait_for_blank_new_notebook()
                 notebook_id = self._extract_notebook_id(notebook_url)
                 self.automation.press("Escape")
@@ -828,7 +1143,7 @@ class VisualNotebookLMSession:
                 try:
                     self._click(self.coordinates.recent_untitled_notebook)
                     self._sleep()
-                    notebook_url = self._wait_for_notebook_url(ignored_url=current_url)
+                    notebook_url = self._wait_for_notebook_url(timeout_seconds=60.0, ignored_url=current_url)
                     self._wait_for_blank_new_notebook()
                     notebook_id = self._extract_notebook_id(notebook_url)
                     self.automation.press("Escape")
@@ -853,11 +1168,16 @@ class VisualNotebookLMSession:
         self._sleep()
         visible_text = self._wait_for_notebook_ready()
         last_error: RpaError | None = None
+        uploaded_directly = False
         for _ in range(2):
             if not self._add_source_dialog_is_open(visible_text):
                 self._click(self.coordinates.add_source)
                 self._sleep()
             self._select_add_source_deep_research()
+            if self._upload_files_directly(uploadable):
+                uploaded_directly = True
+                last_error = None
+                break
             self._click(self.coordinates.upload_source)
             self._sleep()
             try:
@@ -869,16 +1189,17 @@ class VisualNotebookLMSession:
                 visible_text = self._read_visible_text()
         if last_error is not None:
             raise last_error
-        self.automation.hotkey("ctrl", "l")
-        self.automation.paste_text(str(parent_dir))
-        self._sleep()
-        self.automation.press("Return")
-        self._sleep_at_least(2.0)
-        self._click(self.coordinates.file_picker_list)
-        self._sleep()
-        self.automation.hotkey("ctrl", "a")
-        self._sleep()
-        self._click(self.coordinates.file_picker_open)
+        if not uploaded_directly:
+            self.automation.hotkey("ctrl", "l")
+            self.automation.paste_text(str(parent_dir))
+            self._sleep()
+            self.automation.press("Return")
+            self._sleep_at_least(2.0)
+            self._click(self.coordinates.file_picker_list)
+            self._sleep()
+            self.automation.hotkey("ctrl", "a")
+            self._sleep()
+            self._click(self.coordinates.file_picker_open)
         self._wait_for_uploaded_sources(len(uploadable))
         self._screenshot("upload_sources")
         return len(uploadable)
@@ -888,9 +1209,16 @@ class VisualNotebookLMSession:
         self.automation.focus_chrome()
         self.automation.press("Escape")
         self._sleep()
-        self._click(self.coordinates.chrome_restore_close)
-        self._sleep()
         self.automation.press("Escape")
+        submit_chat_prompt = getattr(self.automation, "submit_chat_prompt", None)
+        if callable(submit_chat_prompt):
+            try:
+                submit_chat_prompt(prompt)
+                self._sleep_at_least(2.0)
+                self._screenshot("start_deep_research")
+                return
+            except RpaError:
+                self.automation.press("Escape")
         for attempt in range(3):
             self._click(self.coordinates.chat_prompt_input)
             self._sleep()
@@ -943,8 +1271,6 @@ class VisualNotebookLMSession:
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
         existing_downloads = set(self.downloads_dir.glob("*"))
         self.automation.focus_chrome()
-        self._click(self.coordinates.chrome_restore_close)
-        self._sleep()
         self.automation.press("Escape")
         self._sleep()
         self._click(self.coordinates.studio_breadcrumb)
@@ -979,6 +1305,9 @@ class VisualNotebookLMSession:
         self._sleep()
 
     def _copy_current_url(self) -> str:
+        get_current_url = getattr(self.automation, "get_current_url", None)
+        if callable(get_current_url):
+            return get_current_url()
         self.automation.focus_chrome()
         self.automation.hotkey("ctrl", "l")
         return self.automation.copy_selection()
@@ -1051,10 +1380,27 @@ class VisualNotebookLMSession:
         return self.automation.get_accessible_text()
 
     def _select_add_source_deep_research(self) -> None:
+        select_deep_research = getattr(self.automation, "select_deep_research", None)
+        if callable(select_deep_research):
+            try:
+                select_deep_research()
+                return
+            except RpaError:
+                pass
         self._click(self.coordinates.add_source_research_dropdown)
         self._sleep()
         self._click(self.coordinates.add_source_deep_research)
         self._sleep()
+
+    def _upload_files_directly(self, files: list[Path]) -> bool:
+        upload_files = getattr(self.automation, "upload_files", None)
+        if not callable(upload_files):
+            return False
+        try:
+            upload_files(files)
+        except RpaError:
+            return False
+        return True
 
     def _chat_source_count(self, visible_text: str) -> int:
         if "开始输入" in visible_text:
@@ -1110,6 +1456,10 @@ class VisualNotebookLMSession:
             raise RpaError(f"Cannot extract notebook_id from URL: {url}")
         return parts[-1]
 
+    def _is_existing_notebook_url(self, url: str) -> bool:
+        parts = [part for part in urlparse(url).path.split("/") if part]
+        return len(parts) >= 2 and parts[-2] == "notebook" and parts[-1] != "creating"
+
     def _wait_for_home_page(self, timeout_seconds: float = 20.0) -> None:
         deadline = time.monotonic() + timeout_seconds
         last_text = ""
@@ -1148,17 +1498,27 @@ class VisualNotebookLMSession:
         last_text = ""
         while time.monotonic() <= deadline:
             last_text = self._read_visible_text()
-            if (
-                "0 个来源" in last_text
-                and (
-                    "已保存的来源将显示在此处" in last_text
-                    or "添加来源后" in last_text
-                    or "Untitled notebook" in last_text
-                )
-            ):
+            if self._blank_new_notebook_is_ready(last_text):
                 return
             time.sleep(0.5)
         raise RpaError(f"New notebook did not become blank: {last_text[:120]}")
+
+    def _blank_new_notebook_is_ready(self, visible_text: str) -> bool:
+        if "添加来源" not in visible_text or "来源" not in visible_text:
+            return False
+        if re.search(r"[1-9]\d*\s*个来源", visible_text):
+            return False
+        if "0 个来源" in visible_text:
+            return (
+                "已保存的来源将显示在此处" in visible_text
+                or "添加来源后" in visible_text
+                or "Untitled notebook" in visible_text
+            )
+        return (
+            "创建笔记本" in visible_text
+            and "Web" in visible_text
+            and ("search" in visible_text or "搜索" in visible_text)
+        )
 
     def _common_parent(self, files: list[Path]) -> Path:
         parents = {path.parent for path in files}

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import socket
 import subprocess
 
 from app.domain import deep_research_prompt
@@ -105,7 +106,7 @@ def test_create_new_notebook_copies_url_and_extracts_notebook_id() -> None:
     class HomeAutomation(FakeAutomation):
         def click(self, x: int, y: int) -> None:
             super().click(x, y)
-            if (x, y) == (1684, 198):
+            if (x, y) == (1600, 30):
                 self.navigate_to_blank_notebook("https://notebooklm.google.com/notebook/notebook-123")
 
     automation = HomeAutomation("https://notebooklm.google.com/notebook/old-notebook")
@@ -129,7 +130,7 @@ def test_create_new_notebook_clears_address_bar_focus_after_url_detection() -> N
     class HomeAutomation(FakeAutomation):
         def click(self, x: int, y: int) -> None:
             super().click(x, y)
-            if (x, y) == (1684, 198):
+            if (x, y) == (1600, 30):
                 self.navigate_to_blank_notebook("https://notebooklm.google.com/notebook/notebook-123?addSource=true")
 
     automation = HomeAutomation("https://notebooklm.google.com/notebook/old-notebook")
@@ -150,6 +151,35 @@ def test_create_new_notebook_clears_address_bar_focus_after_url_detection() -> N
     assert ("press", "Escape") in automation.commands[:screenshot_index]
 
 
+def test_create_new_notebook_uses_automation_current_url_when_available() -> None:
+    class UrlAutomation(FakeAutomation):
+        def get_current_url(self) -> str:
+            self.commands.append(("get_current_url", None))
+            return self.current_url
+
+        def click(self, x: int, y: int) -> None:
+            super().click(x, y)
+            if (x, y) == (1600, 30):
+                self.navigate_to_blank_notebook("https://notebooklm.google.com/notebook/url-api-new")
+
+    automation = UrlAutomation("https://notebooklm.google.com/notebook/old-notebook")
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=Path("/tmp/screenshots"),
+        downloads_dir=Path("/tmp/downloads"),
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    notebook_id, notebook_url = session.create_new_notebook()
+
+    assert notebook_id == "url-api-new"
+    assert notebook_url == "https://notebooklm.google.com/notebook/url-api-new"
+    assert ("get_current_url", None) in automation.commands
+    assert ("hotkey", ("ctrl", "l")) not in automation.commands
+
+
 def test_create_new_notebook_clicks_home_new_button_when_on_homepage() -> None:
     class HomeAutomation(FakeAutomation):
         def __init__(self) -> None:
@@ -157,7 +187,7 @@ def test_create_new_notebook_clicks_home_new_button_when_on_homepage() -> None:
 
         def click(self, x: int, y: int) -> None:
             super().click(x, y)
-            if (x, y) == (1684, 198):
+            if (x, y) == (1674, 147):
                 self.navigate_to_blank_notebook("https://notebooklm.google.com/notebook/notebook-456?addSource=true")
 
     automation = HomeAutomation()
@@ -174,17 +204,18 @@ def test_create_new_notebook_clicks_home_new_button_when_on_homepage() -> None:
 
     assert notebook_id == "notebook-456"
     assert notebook_url == "https://notebooklm.google.com/notebook/notebook-456?addSource=true"
-    assert ("click", (1684, 198)) in automation.commands
+    assert ("click", (1674, 147)) in automation.commands
+    assert ("click", (1600, 30)) not in automation.commands
 
 
-def test_create_new_notebook_navigates_home_before_creating_from_old_notebook() -> None:
+def test_create_new_notebook_uses_top_button_when_on_old_notebook() -> None:
     class NotebookAutomation(FakeAutomation):
         def __init__(self) -> None:
             super().__init__("https://notebooklm.google.com/notebook/old-notebook")
 
         def click(self, x: int, y: int) -> None:
             super().click(x, y)
-            if (x, y) == (1684, 198):
+            if (x, y) == (1600, 30):
                 self.current_url = "https://notebooklm.google.com/notebook/new-notebook?addSource=true"
                 self.visible_text = BLANK_NOTEBOOK_TEXT
 
@@ -202,23 +233,24 @@ def test_create_new_notebook_navigates_home_before_creating_from_old_notebook() 
 
     assert notebook_id == "new-notebook"
     assert notebook_url == "https://notebooklm.google.com/notebook/new-notebook?addSource=true"
-    assert ("paste_text", "https://notebooklm.google.com") in automation.commands
-    assert ("click", (1684, 198)) in automation.commands
+    assert ("paste_text", "https://notebooklm.google.com") not in automation.commands
+    assert ("click", (1600, 30)) in automation.commands
 
 
 def test_create_new_notebook_waits_until_creating_url_resolves(monkeypatch) -> None:
     class CreatingAutomation(FakeAutomation):
         def __init__(self) -> None:
             super().__init__("https://notebooklm.google.com/")
-            self.copied_urls = [
-                "https://notebooklm.google.com/notebook/creating",
-                "https://notebooklm.google.com/notebook/notebook-789?addSource=true",
-            ]
+            self.copied_urls: list[str] = []
 
         def click(self, x: int, y: int) -> None:
             super().click(x, y)
-            if (x, y) == (1684, 198):
+            if (x, y) == (1674, 147):
                 self.current_url = "https://notebooklm.google.com/notebook/creating"
+                self.copied_urls = [
+                    "https://notebooklm.google.com/notebook/creating",
+                    "https://notebooklm.google.com/notebook/notebook-789?addSource=true",
+                ]
 
         def copy_selection(self) -> str:
             self.commands.append(("copy_selection", None))
@@ -278,7 +310,7 @@ def test_create_new_notebook_opens_recent_untitled_when_home_create_does_not_nav
 
     assert notebook_id == "retried-notebook"
     assert notebook_url == "https://notebooklm.google.com/notebook/retried-notebook?addSource=true"
-    assert automation.commands.count(("click", (1684, 198))) == 1
+    assert automation.commands.count(("click", (1674, 147))) == 1
     assert ("click", (300, 724)) in automation.commands
 
 
@@ -290,13 +322,13 @@ def test_create_new_notebook_does_not_return_existing_notebook_url() -> None:
 
         def click(self, x: int, y: int) -> None:
             super().click(x, y)
-            if (x, y) == (1684, 198):
+            if (x, y) == (1674, 147):
                 self.create_clicks += 1
                 if self.create_clicks == 1:
                     self.current_url = "https://notebooklm.google.com/notebook/old-notebook"
                     self.visible_text = READY_NOTEBOOK_TEXT
-                else:
-                    self.navigate_to_blank_notebook("https://notebooklm.google.com/notebook/recovered-notebook")
+            elif (x, y) == (1600, 30):
+                self.navigate_to_blank_notebook("https://notebooklm.google.com/notebook/recovered-notebook")
 
     class StrictBlankSession(VisualNotebookLMSession):
         def _wait_for_blank_new_notebook(self, timeout_seconds: float = 30.0) -> None:
@@ -317,6 +349,74 @@ def test_create_new_notebook_does_not_return_existing_notebook_url() -> None:
 
     assert notebook_id == "recovered-notebook"
     assert notebook_url == "https://notebooklm.google.com/notebook/recovered-notebook"
+
+
+def test_create_new_notebook_accepts_new_blank_ui_without_source_count() -> None:
+    new_blank_ui_text = (
+        "add\n创建笔记本\ntrending_up\n分析\nshare\n分享\nsettings\n设置\nULTRA\n"
+        "来源\ndock_to_right\nadd\n添加来源\nsearch\nlanguage\nWeb\nkeyboard_arrow_down\nsearch"
+    )
+
+    class NewBlankAutomation(FakeAutomation):
+        def __init__(self) -> None:
+            super().__init__("https://notebooklm.google.com/")
+
+        def click(self, x: int, y: int) -> None:
+            super().click(x, y)
+            if (x, y) == (1674, 147):
+                self.navigate_to_blank_notebook("https://notebooklm.google.com/notebook/new-blank-ui")
+                self.visible_text = new_blank_ui_text
+
+    automation = NewBlankAutomation()
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=Path("/tmp/screenshots"),
+        downloads_dir=Path("/tmp/downloads"),
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    notebook_id, notebook_url = session.create_new_notebook()
+
+    assert notebook_id == "new-blank-ui"
+    assert notebook_url == "https://notebooklm.google.com/notebook/new-blank-ui"
+
+
+def test_create_new_notebook_allows_slow_home_create_navigation() -> None:
+    class SlowCreateSession(VisualNotebookLMSession):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.notebook_url_timeout = None
+
+        def _wait_for_notebook_url(
+            self,
+            timeout_seconds: float = 15.0,
+            ignored_url: str | None = None,
+        ) -> str:
+            self.notebook_url_timeout = timeout_seconds
+            return "https://notebooklm.google.com/notebook/slow-new-notebook"
+
+        def _wait_for_blank_new_notebook(self, timeout_seconds: float = 30.0) -> None:
+            return None
+
+    class HomeAutomation(FakeAutomation):
+        def __init__(self) -> None:
+            super().__init__("https://notebooklm.google.com/")
+
+    automation = HomeAutomation()
+    session = SlowCreateSession(
+        display=":1",
+        screenshots_dir=Path("/tmp/screenshots"),
+        downloads_dir=Path("/tmp/downloads"),
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    session.create_new_notebook()
+
+    assert session.notebook_url_timeout == 60.0
 
 
 def test_upload_sources_selects_common_parent_directory(tmp_path: Path) -> None:
@@ -382,6 +482,167 @@ def test_upload_sources_waits_for_file_picker_before_typing_path(tmp_path: Path)
     assert picker_index < path_index
 
 
+def test_upload_sources_uses_direct_browser_upload_when_available(tmp_path: Path) -> None:
+    class DirectUploadAutomation(FakeAutomation):
+        def select_deep_research(self) -> None:
+            self.commands.append(("select_deep_research", None))
+
+        def upload_files(self, files: list[Path]) -> None:
+            self.commands.append(("upload_files", tuple(files)))
+            self.visible_text = (
+                "来源\n添加来源\n对话\n这些文件已经生成摘要，可继续提问和生成输出。"
+                "摘要包含患者现病史、既往治疗经过、主要检查结果和初步诊断。"
+                "\n开始输入…\n2 个来源\nStudio"
+            )
+
+    first = tmp_path / "a.pdf"
+    second = tmp_path / "b.docx"
+    first.write_text("a")
+    second.write_text("b")
+    automation = DirectUploadAutomation()
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    count = session.upload_sources([first, second])
+
+    assert count == 2
+    assert ("select_deep_research", None) in automation.commands
+    assert ("upload_files", (first, second)) in automation.commands
+    assert ("wait_for_window", "Open Files") not in automation.commands
+    assert ("paste_text", str(tmp_path)) not in automation.commands
+    assert ("click", (1370, 452)) not in automation.commands
+    assert ("click", (878, 600)) not in automation.commands
+
+
+def test_desktop_upload_files_sets_cdp_file_input_files(tmp_path: Path) -> None:
+    source = tmp_path / "a.pdf"
+    source.write_text("a")
+
+    class CdpAutomation(DesktopAutomation):
+        def __init__(self) -> None:
+            super().__init__(display=":1", remote_debugging_port=9222)
+            self.calls: list[tuple[str, dict | None]] = []
+
+        def _find_cdp_target(self) -> dict:
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1"}
+
+        def _upload_files_with_file_chooser_intercept(self, websocket_url: str, files: list[str]) -> None:
+            raise visual_adapter.RpaError("intercept unavailable")
+
+        def _cdp_call(self, websocket_url: str, method: str, params: dict | None = None) -> dict:
+            self.calls.append((method, params))
+            if method == "Runtime.evaluate":
+                return {"result": {"result": {"objectId": "file-input-1"}}}
+            return {"result": {}}
+
+    automation = CdpAutomation()
+
+    automation.upload_files([source])
+
+    assert ("DOM.setFileInputFiles", {"objectId": "file-input-1", "files": [str(source.resolve())]}) in automation.calls
+    assert any(method == "Runtime.callFunctionOn" for method, _ in automation.calls)
+
+
+def test_desktop_upload_files_prefers_intercepted_file_chooser(tmp_path: Path) -> None:
+    source = tmp_path / "a.pdf"
+    source.write_text("a")
+
+    class InterceptAutomation(DesktopAutomation):
+        def __init__(self) -> None:
+            super().__init__(display=":1", remote_debugging_port=9222)
+            self.intercepted: tuple[str, list[str]] | None = None
+
+        def _find_cdp_target(self) -> dict:
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1"}
+
+        def _upload_files_with_file_chooser_intercept(self, websocket_url: str, files: list[str]) -> None:
+            self.intercepted = (websocket_url, files)
+
+        def _cdp_call(self, websocket_url: str, method: str, params: dict | None = None) -> dict:
+            raise AssertionError("fallback CDP path should not run")
+
+    automation = InterceptAutomation()
+
+    automation.upload_files([source])
+
+    assert automation.intercepted == (
+        "ws://127.0.0.1/devtools/page/1",
+        [str(source.resolve())],
+    )
+
+
+def test_wait_for_cdp_response_ignores_socket_timeout(monkeypatch) -> None:
+    automation = DesktopAutomation(":1")
+    messages: list[dict | BaseException] = [
+        socket.timeout("timed out"),
+        {"id": 3, "result": {"result": {"value": True}}},
+    ]
+
+    def fake_recv_json(sock) -> dict:
+        message = messages.pop(0)
+        if isinstance(message, BaseException):
+            raise message
+        return message
+
+    monkeypatch.setattr(automation, "_websocket_recv_json", fake_recv_json)
+
+    assert automation._wait_for_cdp_response(object(), 3, "Runtime.evaluate") == {
+        "id": 3,
+        "result": {"result": {"value": True}},
+    }
+
+
+def test_wait_for_file_chooser_backend_node_ignores_socket_timeout(monkeypatch) -> None:
+    automation = DesktopAutomation(":1")
+    messages: list[dict | BaseException] = [
+        socket.timeout("timed out"),
+        {"id": 7, "result": {"result": {"value": True}}},
+        {"method": "Page.fileChooserOpened", "params": {"backendNodeId": 42}},
+    ]
+
+    def fake_recv_json(sock) -> dict:
+        message = messages.pop(0)
+        if isinstance(message, BaseException):
+            raise message
+        return message
+
+    monkeypatch.setattr(automation, "_websocket_recv_json", fake_recv_json)
+
+    assert automation._wait_for_file_chooser_backend_node(object(), 7) == 42
+
+
+def test_upload_sources_falls_back_to_file_picker_when_direct_upload_fails(tmp_path: Path) -> None:
+    class FailingDirectUploadAutomation(FakeAutomation):
+        def upload_files(self, files: list[Path]) -> None:
+            self.commands.append(("upload_files", tuple(files)))
+            raise visual_adapter.RpaError("Chrome DevTools file input was not found")
+
+    source = tmp_path / "a.pdf"
+    source.write_text("a")
+    automation = FailingDirectUploadAutomation()
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    count = session.upload_sources([source])
+
+    assert count == 1
+    assert ("upload_files", (source,)) in automation.commands
+    assert ("wait_for_window", "Open Files") in automation.commands
+    assert ("paste_text", str(tmp_path)) in automation.commands
+
+
 def test_upload_sources_retries_when_file_picker_does_not_open(tmp_path: Path) -> None:
     class RetryAutomation(FakeAutomation):
         def __init__(self) -> None:
@@ -429,7 +690,7 @@ def test_upload_sources_selects_deep_research_in_add_source_dialog_before_upload
 
     session.upload_sources([source])
 
-    add_source_index = automation.commands.index(("click", (252, 320)))
+    add_source_index = automation.commands.index(("click", (252, 186)))
     research_dropdown_index = automation.commands.index(("click", (878, 600)))
     deep_research_index = automation.commands.index(("click", (872, 665)))
     upload_index = automation.commands.index(("click", (805, 791)))
@@ -459,7 +720,7 @@ def test_upload_sources_uses_open_add_source_dialog_without_reclicking_add_sourc
     session.upload_sources([source])
 
     upload_index = automation.commands.index(("click", (805, 791)))
-    assert ("click", (252, 320)) not in automation.commands[:upload_index]
+    assert ("click", (252, 186)) not in automation.commands[:upload_index]
 
 
 def test_upload_sources_focuses_file_list_and_clicks_open(tmp_path: Path) -> None:
@@ -581,7 +842,7 @@ def test_upload_sources_waits_for_notebook_page_before_clicking_add_source(
 
     session.upload_sources([source])
 
-    add_source_index = automation.commands.index(("click", (252, 320)))
+    add_source_index = automation.commands.index(("click", (252, 186)))
     assert automation.commands[:add_source_index].count(("get_accessible_text", None)) == 2
 
 
@@ -758,6 +1019,53 @@ def test_start_deep_research_uses_bottom_chat_input_and_enter(tmp_path: Path) ->
     assert input_index < paste_index < submit_index
 
 
+def test_start_deep_research_uses_direct_chat_submit_when_available(tmp_path: Path) -> None:
+    class DirectChatAutomation(FakeAutomation):
+        def submit_chat_prompt(self, prompt: str) -> None:
+            self.commands.append(("submit_chat_prompt", prompt))
+            self.visible_text = f"今天\n{prompt}\nInitiating the Analysis..."
+
+    automation = DirectChatAutomation()
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    session.start_deep_research("prompt")
+
+    assert ("submit_chat_prompt", "prompt") in automation.commands
+    assert ("click", (900, 1143)) not in automation.commands
+    assert ("paste_text", "prompt") not in automation.commands
+
+
+def test_desktop_submit_chat_prompt_uses_cdp_textarea_submit() -> None:
+    class CdpAutomation(DesktopAutomation):
+        def __init__(self) -> None:
+            super().__init__(display=":1", remote_debugging_port=9222)
+            self.calls: list[tuple[str, dict | None]] = []
+
+        def _find_cdp_target(self) -> dict:
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1"}
+
+        def _cdp_call(self, websocket_url: str, method: str, params: dict | None = None) -> dict:
+            self.calls.append((method, params))
+            return {"result": {"result": {"value": {"ok": True, "submitted": "button"}}}}
+
+    automation = CdpAutomation()
+
+    automation.submit_chat_prompt("prompt")
+
+    assert automation.calls[0][0] == "Runtime.evaluate"
+    params = automation.calls[0][1] or {}
+    assert params["awaitPromise"] is True
+    assert "textarea" in params["expression"]
+    assert "prompt" in params["expression"]
+
+
 def test_start_deep_research_dismisses_restore_prompt_before_bottom_chat_input(
     tmp_path: Path,
 ) -> None:
@@ -773,9 +1081,8 @@ def test_start_deep_research_dismisses_restore_prompt_before_bottom_chat_input(
 
     session.start_deep_research("prompt")
 
-    restore_close_index = automation.commands.index(("click", (1890, 144)))
     input_index = automation.commands.index(("click", (900, 1143)))
-    assert restore_close_index < input_index
+    assert ("press", "Escape") in automation.commands[:input_index]
 
 
 def test_start_deep_research_retries_when_prompt_does_not_appear(
@@ -908,6 +1215,8 @@ def test_wait_for_research_accepts_fast_research_completion_text(
         delay_seconds=0,
     )
     monkeypatch.setattr(visual_adapter.time, "sleep", lambda seconds: None)
+    ticks = iter([0.0, 0.0, 2701.0])
+    monkeypatch.setattr(visual_adapter.time, "monotonic", lambda: next(ticks))
 
     session.wait_for_research()
 
@@ -956,6 +1265,29 @@ def test_wait_for_research_accepts_variant_clean_clinic_record_answer_text(
     assert ("screenshot", tmp_path / "screenshots" / "wait_for_research.png") in automation.commands
 
 
+def test_wait_for_research_accepts_direct_clean_record_intro(
+    tmp_path: Path, monkeypatch
+) -> None:
+    automation = FakeAutomation(
+        visible_text="为您梳理的纯净版门诊记录单如下：\n门诊记录单\n【主诉】腹胀。"
+    )
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+    monkeypatch.setattr(visual_adapter.time, "sleep", lambda seconds: None)
+    ticks = iter([0.0, 0.0, 2701.0])
+    monkeypatch.setattr(visual_adapter.time, "monotonic", lambda: next(ticks))
+
+    session.wait_for_research()
+
+    assert ("screenshot", tmp_path / "screenshots" / "wait_for_research.png") in automation.commands
+
+
 def test_wait_for_research_accepts_ready_clean_record_answer_variant(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -980,6 +1312,42 @@ def test_wait_for_research_accepts_ready_clean_record_answer_variant(
     session.wait_for_research()
 
     assert ("screenshot", tmp_path / "screenshots" / "wait_for_research.png") in automation.commands
+
+
+def test_wait_for_research_does_not_treat_prompt_with_ready_footer_as_complete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    class PromptOnlyAutomation(FakeAutomation):
+        def __init__(self) -> None:
+            super().__init__()
+            self.visible_texts = [
+                (
+                    "今天\n请帮我梳理成 门诊记录单格式，不带来源 编号"
+                    "\nPrioritizing User Request...\n回复已就绪。"
+                ),
+                "这是一份为您梳理的纯净版门诊记录单。\n主诉：腹痛。",
+            ]
+
+        def get_accessible_text(self) -> str:
+            self.commands.append(("get_accessible_text", None))
+            if self.visible_texts:
+                return self.visible_texts.pop(0)
+            return "这是一份为您梳理的纯净版门诊记录单。\n主诉：腹痛。"
+
+    automation = PromptOnlyAutomation()
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+    monkeypatch.setattr(visual_adapter.time, "sleep", lambda seconds: None)
+
+    session.wait_for_research()
+
+    assert automation.commands.count(("get_accessible_text", None)) == 2
 
 
 def test_wait_for_research_does_not_treat_step_progress_as_complete(
@@ -1287,10 +1655,10 @@ def test_save_results_returns_to_studio_list_before_opening_presentation_menu(tm
 
     session.save_results(tmp_path / "result")
 
-    close_index = automation.commands.index(("click", (1890, 144)))
     studio_index = automation.commands.index(("click", (1217, 184)))
     menu_index = automation.commands.index(("click", (1863, 401)))
-    assert close_index < studio_index < menu_index
+    assert ("press", "Escape") in automation.commands[:studio_index]
+    assert studio_index < menu_index
 
 
 def test_desktop_automation_falls_back_to_tk_clipboard(monkeypatch) -> None:
@@ -1375,8 +1743,34 @@ def test_focus_chrome_retries_until_window_appears(monkeypatch) -> None:
             raise subprocess.CalledProcessError(1, ["xdotool", *args])
 
     monkeypatch.setattr(automation, "_xdotool", fake_xdotool)
+    monkeypatch.setattr(
+        automation,
+        "_xdotool_output",
+        lambda *args: (_ for _ in ()).throw(subprocess.CalledProcessError(1, ["xdotool", *args])),
+    )
     monkeypatch.setattr(visual_adapter.time, "sleep", lambda seconds: None)
 
     automation.focus_chrome(timeout_seconds=1)
 
     assert len(attempts) == 2
+
+
+def test_focus_chrome_falls_back_to_windowfocus_when_windowactivate_is_unsupported(monkeypatch) -> None:
+    automation = DesktopAutomation(":1")
+    calls = []
+
+    def fake_xdotool(*args: str) -> None:
+        calls.append(args)
+        if args == ("search", "--onlyvisible", "--class", "chrome", "windowactivate", "--sync"):
+            raise subprocess.CalledProcessError(1, ["xdotool", *args])
+
+    monkeypatch.setattr(automation, "_xdotool", fake_xdotool)
+    monkeypatch.setattr(automation, "_xdotool_output", lambda *args: "4194307\n")
+    monkeypatch.setattr(visual_adapter.time, "sleep", lambda seconds: None)
+
+    automation.focus_chrome(timeout_seconds=1)
+
+    assert ("windowmove", "4194307", "0", "0") in calls
+    assert ("windowsize", "4194307", "1920", "1200") in calls
+    assert ("windowraise", "4194307") in calls
+    assert ("windowfocus", "4194307") in calls

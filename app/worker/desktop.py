@@ -10,12 +10,13 @@ class DesktopManager:
         display: str,
         vnc_port: int,
         chrome_user_data_dir: Path,
-        geometry: str = "1600x1000",
+        geometry: str = "1920x1200",
         depth: str = "24",
         chrome_binary: str = "google-chrome",
         proxy_url: str | None = None,
         downloads_dir: Path | None = None,
         remote_debugging_port: int | None = None,
+        vnc_localhost: bool = True,
     ) -> None:
         self.display = display
         self.vnc_port = vnc_port
@@ -26,9 +27,20 @@ class DesktopManager:
         self.proxy_url = proxy_url
         self.downloads_dir = downloads_dir
         self.remote_debugging_port = remote_debugging_port
+        self.vnc_localhost = vnc_localhost
 
     def vnc_command(self) -> list[str]:
-        return ["vncserver", self.display, "-geometry", self.geometry, "-depth", self.depth]
+        localhost_value = "yes" if self.vnc_localhost else "no"
+        return [
+            "vncserver",
+            self.display,
+            "-localhost",
+            localhost_value,
+            "-geometry",
+            self.geometry,
+            "-depth",
+            self.depth,
+        ]
 
     def chrome_command(self, url: str) -> list[str]:
         command = [
@@ -41,6 +53,9 @@ class DesktopManager:
             "--disable-crash-reporter",
             "--disable-crashpad",
             "--start-maximized",
+            "--start-fullscreen",
+            "--window-position=0,0",
+            "--window-size=1920,1200",
             "--force-renderer-accessibility",
         ]
         if self.proxy_url:

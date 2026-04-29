@@ -40,6 +40,7 @@ def _run_main_with_fakes(
         vnc_port = settings_vnc_port
         chrome_user_data_dir = None
         chrome_remote_debugging_port = None
+        vnc_localhost = False
         automation_mode = fake_automation_mode
         notebooklm_url = "https://notebooklm.example"
         poll_interval_seconds = 2.0
@@ -58,6 +59,7 @@ def _run_main_with_fakes(
             proxy_url=None,
             downloads_dir=None,
             remote_debugging_port=None,
+            vnc_localhost=None,
         ):
             calls["desktop"] = {
                 "display": display,
@@ -66,6 +68,7 @@ def _run_main_with_fakes(
                 "proxy_url": proxy_url,
                 "downloads_dir": downloads_dir,
                 "remote_debugging_port": remote_debugging_port,
+                "vnc_localhost": vnc_localhost,
             }
 
         def ensure_vnc(self):
@@ -143,6 +146,7 @@ def test_main_uses_cli_worker_id_for_default_chrome_profile(monkeypatch) -> None
     assert calls["desktop"]["vnc_port"] == 5922
     assert calls["desktop"]["chrome_user_data_dir"] == expected_profile
     assert calls["desktop"]["downloads_dir"] == Path("/tmp/workers/worker-2/downloads")
+    assert calls["desktop"]["vnc_localhost"] is False
     assert calls["runner"]["worker_id"] == "worker-2"
     assert calls["runner"]["display"] == ":22"
     assert calls["runner"]["vnc_port"] == 5922
