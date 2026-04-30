@@ -2,12 +2,14 @@ import json
 from pathlib import Path
 import socket
 import subprocess
+import inspect
 
 from app.domain import deep_research_prompt
 from app.worker.rpa import visual_adapter
 from app.worker.rpa.visual_adapter import (
     DesktopAutomation,
     VisualNotebookLMSession,
+    extract_presentation_download_url,
     extract_clinic_record_markdown,
 )
 
@@ -206,6 +208,45 @@ def test_create_new_notebook_clicks_home_new_button_when_on_homepage() -> None:
     assert notebook_url == "https://notebooklm.google.com/notebook/notebook-456?addSource=true"
     assert ("click", (1674, 147)) in automation.commands
     assert ("click", (1600, 30)) not in automation.commands
+
+
+def test_create_new_notebook_prefers_direct_new_button_click_when_available() -> None:
+    direct_url = "https://notebooklm.google.com/notebook/direct-new?addSource=true"
+
+    class DirectNewAutomation(FakeAutomation):
+        def __init__(self) -> None:
+            super().__init__("https://notebooklm.google.com/")
+
+        def click_new_notebook(self) -> None:
+            self.commands.append(("click_new_notebook", None))
+            self.navigate_to_blank_notebook(direct_url)
+
+    class FastFailSession(VisualNotebookLMSession):
+        def _wait_for_notebook_url(
+            self,
+            timeout_seconds: float = 15.0,
+            ignored_url: str | None = None,
+        ) -> str:
+            if self.automation.current_url == direct_url:
+                return direct_url
+            raise visual_adapter.RpaError("direct new notebook click was not used")
+
+    automation = DirectNewAutomation()
+    session = FastFailSession(
+        display=":1",
+        screenshots_dir=Path("/tmp/screenshots"),
+        downloads_dir=Path("/tmp/downloads"),
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    notebook_id, notebook_url = session.create_new_notebook()
+
+    assert notebook_id == "direct-new"
+    assert notebook_url == direct_url
+    assert ("click_new_notebook", None) in automation.commands
+    assert ("click", (1674, 147)) not in automation.commands
 
 
 def test_create_new_notebook_uses_top_button_when_on_old_notebook() -> None:
@@ -520,6 +561,166 @@ def test_upload_sources_uses_direct_browser_upload_when_available(tmp_path: Path
     assert ("click", (878, 600)) not in automation.commands
 
 
+def test_upload_sources_prefers_direct_add_source_click_before_upload(tmp_path: Path) -> None:
+    source = tmp_path / "a.pdf"
+    source.write_text("a")
+
+    class DirectAddSourceAutomation(FakeAutomation):
+        def __init__(self) -> None:
+            super().__init__("https://notebooklm.google.com/notebook/new", visible_text=BLANK_NOTEBOOK_TEXT)
+
+        def click_text(self, text: str) -> None:
+            self.commands.append(("click_text", text))
+            if text == "添加来源":
+                self.visible_text = "上传文件\n或拖放文件\nFast Research\nDeep Research"
+
+        def select_deep_research(self) -> None:
+            self.commands.append(("select_deep_research", None))
+            if "上传文件" not in self.visible_text:
+                raise visual_adapter.RpaError("add source dialog was not opened")
+
+        def upload_files(self, files: list[Path]) -> None:
+            self.commands.append(("upload_files", tuple(files)))
+            if "上传文件" not in self.visible_text:
+                raise visual_adapter.RpaError("add source dialog was not opened")
+            self.visible_text = READY_NOTEBOOK_TEXT
+
+        def wait_for_window(self, name: str) -> None:
+            self.commands.append(("wait_for_window", name))
+            raise visual_adapter.RpaError("file picker should not be used")
+
+    automation = DirectAddSourceAutomation()
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    count = session.upload_sources([source])
+
+    assert count == 1
+    assert ("click_text", "添加来源") in automation.commands
+    assert ("click", (252, 186)) not in automation.commands
+    assert ("upload_files", (source,)) in automation.commands
+
+
+def test_wait_for_new_downloads_default_timeout_matches_runtime_setting() -> None:
+    timeout = inspect.signature(VisualNotebookLMSession._wait_for_new_downloads).parameters[
+        "timeout_seconds"
+    ].default
+
+    assert timeout == 600.0
+
+
+def test_research_result_ready_accepts_clinic_record_with_reply_ready_marker() -> None:
+    text = (
+        "请帮我梳理成 门诊记录单格式，不带来源 编号（即去掉末尾数字）的纯净版门诊记录单\n"
+        "门诊记录单\n"
+        "基本信息\n"
+        "姓名：马振祥\n"
+        "【主诉】\n发现肝脏占位3年。\n"
+        "【现病史】\n患者近期复查发现增大。\n"
+        "回复已就绪。"
+    )
+
+    assert visual_adapter._research_result_is_ready(text) is True
+
+
+def test_research_result_ready_accepts_diagnosis_and_plan_with_reply_ready_marker() -> None:
+    text = (
+        "请帮我梳理成 门诊记录单格式，不带来源 编号（即去掉末尾数字）的纯净版门诊记录单\n"
+        "六、初步诊断\n"
+        "胆总管占位性病变（考虑胆道恶性肿瘤）\n"
+        "七、患者主要诉求与拟解决问题\n"
+        "明确当前疾病的具体阶段和严重程度。\n"
+        "回复已就绪。"
+    )
+
+    assert visual_adapter._research_result_is_ready(text) is True
+
+
+def test_research_result_ready_accepts_structured_clinic_record_without_reply_marker() -> None:
+    prompt = deep_research_prompt()
+    text = (
+        f"{prompt}\n"
+        "门诊记录单\n"
+        "一、基本信息\n姓名：马振祥\n"
+        "二、主诉\n发现肝脏血管瘤3年，近期复查提示病灶增大。\n"
+        "三、现病史\n患者近期伴上腹及腰背痛。\n"
+        "八、诊疗诉求\n明确最佳治疗方法。\n"
+        "8 个来源\nStudio"
+    )
+
+    assert visual_adapter._research_result_is_ready(text, prompt) is True
+
+
+def test_research_result_ready_accepts_diagnosis_record_without_reply_marker() -> None:
+    prompt = deep_research_prompt()
+    text = (
+        f"{prompt}\n"
+        "门诊/诊疗记录单\n"
+        "【诊断】\n胆总管囊肿内引流术后\n"
+        "【体格检查】\n腹软，全腹无压痛及反跳痛。\n"
+        "【辅助检查】\n腹部核磁提示胆总管囊肿术后改变。\n"
+        "【诊疗经过】\n入院后完善相关检查并行胆总管囊肿根治术。\n"
+        "11 个来源\nStudio"
+    )
+
+    assert visual_adapter._research_result_is_ready(text, prompt) is True
+
+
+def test_research_result_ready_accepts_long_medical_answer_without_standard_headings() -> None:
+    text = (
+        "请帮我梳理成 门诊记录单格式，不带来源 编号（即去掉末尾数字）的纯净版门诊记录单\n"
+        "患者因先天性胆总管扩张接受手术治疗，术中记录胆囊约8×7×6cm，"
+        "胆总管呈球型扩张，囊壁厚约3-4mm，穿刺抽出胆汁样液体约3000ml。"
+        "术中行囊肿空肠端端吻合，并取肝脏组织送病理检查。"
+        "术后患儿安返病房，麻醉满意，已向家属详细交代手术情况。"
+        "后续需结合肝功能恢复情况评估根治手术时机。"
+        "回复已就绪。"
+    )
+
+    assert visual_adapter._research_result_is_ready(text) is True
+
+
+def test_research_result_ready_rejects_system_unable_answer() -> None:
+    text = (
+        "请帮我梳理成 门诊记录单格式，不带来源 编号（即去掉末尾数字）的纯净版门诊记录单\n"
+        "系统无法回答。\n"
+        "回复已就绪。"
+    )
+
+    assert visual_adapter._research_result_is_ready(text) is False
+
+
+def test_research_result_invalid_detects_reply_marker_after_notebooklm_ui_tail() -> None:
+    prompt = deep_research_prompt()
+    text = (
+        f"{prompt}\n"
+        "系统无法回答。\n"
+        "8 个来源\n"
+        "Studio\n"
+        "NotebookLM 提供的内容未必准确，因此请仔细核查回答内容。\n"
+        "回复已就绪。"
+    )
+
+    assert visual_adapter._research_result_is_invalid(text, prompt) is True
+    assert visual_adapter._research_result_is_ready(text, prompt) is False
+
+
+def test_research_result_ready_rejects_missing_sources_answer() -> None:
+    text = (
+        "请帮我梳理成 门诊记录单格式，不带来源 编号（即去掉末尾数字）的纯净版门诊记录单\n"
+        "目前笔记本中还没有添加任何来源。请先上传相关资料。\n"
+        "回复已就绪。"
+    )
+
+    assert visual_adapter._research_result_is_ready(text) is False
+
+
 def test_desktop_upload_files_sets_cdp_file_input_files(tmp_path: Path) -> None:
     source = tmp_path / "a.pdf"
     source.write_text("a")
@@ -575,6 +776,104 @@ def test_desktop_upload_files_prefers_intercepted_file_chooser(tmp_path: Path) -
         "ws://127.0.0.1/devtools/page/1",
         [str(source.resolve())],
     )
+
+
+def test_desktop_upload_files_retries_intercept_before_fallback(tmp_path: Path) -> None:
+    source = tmp_path / "a.pdf"
+    source.write_text("a")
+
+    class FlakyInterceptAutomation(DesktopAutomation):
+        def __init__(self) -> None:
+            super().__init__(display=":1", remote_debugging_port=9222)
+            self.attempts = 0
+
+        def _find_cdp_target(self) -> dict:
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1"}
+
+        def _upload_files_with_file_chooser_intercept(self, websocket_url: str, files: list[str]) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise visual_adapter.RpaError("file chooser event was not received")
+
+        def _find_cdp_file_input(self, websocket_url: str) -> str:
+            raise AssertionError("file input fallback should not run after retry succeeds")
+
+    automation = FlakyInterceptAutomation()
+
+    automation.upload_files([source])
+
+    assert automation.attempts == 2
+
+
+def test_upload_files_intercept_dispatches_mouse_events_for_file_button(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "a.pdf"
+    source.write_text("a")
+
+    class FakeSocket:
+        def close(self) -> None:
+            return None
+
+    class MouseUploadAutomation(DesktopAutomation):
+        def __init__(self) -> None:
+            super().__init__(display=":1", remote_debugging_port=9222)
+            self.commands: list[tuple[str, dict | None]] = []
+
+        def _websocket_handshake(self, sock, parsed) -> None:
+            return None
+
+        def _send_cdp_command(self, sock, method: str, params: dict | None = None) -> dict:
+            self.commands.append((method, params))
+            if method == "Runtime.evaluate":
+                return {"result": {"result": {"value": {"x": 692, "y": 756, "width": 124, "height": 40}}}}
+            return {"result": {}}
+
+        def _websocket_send_cdp_command(self, sock, method: str, params: dict | None = None) -> int:
+            self.commands.append((method, params))
+            return 7
+
+        def _wait_for_file_chooser_backend_node(self, sock, click_request_id: int) -> int:
+            return 42
+
+    monkeypatch.setattr(visual_adapter.socket, "create_connection", lambda *args, **kwargs: FakeSocket())
+    automation = MouseUploadAutomation()
+
+    automation._upload_files_with_file_chooser_intercept(
+        "ws://127.0.0.1:9222/devtools/page/1",
+        [str(source)],
+    )
+
+    mouse_events = [params for method, params in automation.commands if method == "Input.dispatchMouseEvent"]
+    assert ("Page.bringToFront", {}) in automation.commands
+    assert [event["type"] for event in mouse_events] == ["mouseMoved", "mousePressed", "mouseReleased"]
+    assert any(method == "DOM.setFileInputFiles" for method, _ in automation.commands)
+
+
+def test_select_deep_research_brings_tab_front_and_uses_robust_script() -> None:
+    class SelectAutomation(DesktopAutomation):
+        def __init__(self) -> None:
+            super().__init__(display=":1", remote_debugging_port=9222)
+            self.calls: list[tuple[str, dict | None]] = []
+
+        def _find_cdp_target(self) -> dict:
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1"}
+
+        def _cdp_call(self, websocket_url: str, method: str, params: dict | None = None) -> dict:
+            self.calls.append((method, params))
+            if method == "Runtime.evaluate":
+                return {"result": {"result": {"value": {"ok": True}}}}
+            return {"result": {}}
+
+    automation = SelectAutomation()
+
+    automation.select_deep_research()
+
+    assert ("Page.bringToFront", {}) in automation.calls
+    evaluate_calls = [params for method, params in automation.calls if method == "Runtime.evaluate"]
+    assert len(evaluate_calls) == 1
+    assert "Deep Research" in evaluate_calls[0]["expression"]
 
 
 def test_wait_for_cdp_response_ignores_socket_timeout(monkeypatch) -> None:
@@ -998,6 +1297,46 @@ def test_upload_sources_accepts_generated_title_as_ready(tmp_path: Path, monkeyp
     assert automation.commands[open_index:].count(("get_accessible_text", None)) == 1
 
 
+def test_uploaded_sources_ready_accepts_single_line_generated_title(tmp_path: Path) -> None:
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=FakeAutomation(),
+        delay_seconds=0,
+    )
+    text = (
+        "来源\n添加来源\n对话\n"
+        "北京友谊医院临床检验报告单 10 个来源 · 2026年4月29日\n"
+        "4 个来源\nStudio\n"
+        "Studio 输出将保存在此处。"
+    )
+
+    assert session._uploaded_sources_are_ready(text, expected_count=10) is True
+
+
+def test_uploaded_sources_ready_accepts_untitled_image_only_notebook_with_expected_count(
+    tmp_path: Path,
+) -> None:
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=FakeAutomation(),
+        delay_seconds=0,
+    )
+    text = (
+        "来源\n添加来源\nimage a.jpg\nimage b.jpg\n对话\n"
+        "Untitled notebook 10 个来源 · 2026年4月29日\n"
+        "0 个来源\nStudio\n"
+        "Studio 输出将保存在此处。"
+    )
+
+    assert session._uploaded_sources_are_ready(text, expected_count=10) is True
+
+
 def test_start_deep_research_uses_bottom_chat_input_and_enter(tmp_path: Path) -> None:
     automation = FakeAutomation()
     session = VisualNotebookLMSession(
@@ -1135,9 +1474,58 @@ def test_generate_slide_deck_sets_simplified_chinese_before_clicking_presentatio
     dropdown_index = automation.commands.index(("click", (1392, 553)))
     chinese_index = automation.commands.index(("click", (590, 720)))
     save_index = automation.commands.index(("click", (1385, 966)))
-    presentation_index = automation.commands.index(("click", (1650, 238)))
+    presentation_index = automation.commands.index(("click", (1662, 193)))
     assert settings_index < output_language_index < dropdown_index < chinese_index < save_index < presentation_index
     assert automation.commands.count(("press", "Page_Down")) == 8
+
+
+def test_generate_slide_deck_uses_direct_presentation_click_when_available(
+    tmp_path: Path,
+) -> None:
+    class DirectPresentationAutomation(FakeAutomation):
+        def click_text(self, text: str) -> None:
+            self.commands.append(("click_text", text))
+
+    automation = DirectPresentationAutomation("配置设置\n中文（简体）")
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    session.generate_slide_deck(language="简体中文")
+
+    assert ("click_text", "演示文稿") in automation.commands
+    assert ("click", (1662, 193)) not in automation.commands
+
+
+def test_generate_slide_deck_uses_direct_presentation_generation_when_available(
+    tmp_path: Path,
+) -> None:
+    class DirectPresentationAutomation(FakeAutomation):
+        def start_presentation_generation(self) -> None:
+            self.commands.append(("start_presentation_generation", None))
+
+        def click_text(self, text: str) -> None:
+            raise visual_adapter.RpaError("text fallback should not be used")
+
+    automation = DirectPresentationAutomation("配置设置\n中文（简体）")
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+
+    session.generate_slide_deck(language="简体中文")
+
+    assert ("start_presentation_generation", None) in automation.commands
+    assert ("click", (1662, 193)) not in automation.commands
 
 
 def test_generate_slide_deck_does_not_reselect_language_when_already_simplified_chinese(
@@ -1158,7 +1546,7 @@ def test_generate_slide_deck_does_not_reselect_language_when_already_simplified_
     assert ("click", (590, 720)) not in automation.commands
     assert ("press", "Page_Down") not in automation.commands
     save_index = automation.commands.index(("click", (1385, 966)))
-    presentation_index = automation.commands.index(("click", (1650, 238)))
+    presentation_index = automation.commands.index(("click", (1662, 193)))
     assert save_index < presentation_index
 
 
@@ -1383,6 +1771,47 @@ def test_wait_for_research_does_not_treat_step_progress_as_complete(
     assert automation.commands.count(("get_accessible_text", None)) == 2
 
 
+def test_wait_for_research_retries_invalid_ready_answer_and_ignores_old_invalid_text(
+    tmp_path: Path, monkeypatch
+) -> None:
+    prompt = deep_research_prompt()
+
+    class RetryInvalidAutomation(FakeAutomation):
+        def __init__(self) -> None:
+            super().__init__()
+            self.visible_texts = [
+                f"{prompt}\n目前笔记本中还没有添加任何来源。请先上传相关资料。\n回复已就绪。",
+                f"{prompt}\n正在处理您的请求。",
+                (
+                    f"{prompt}\n目前笔记本中还没有添加任何来源。请先上传相关资料。\n回复已就绪。\n"
+                    f"{prompt}\n# 门诊记录单\n【主诉】腹痛。\n【现病史】患者反复腹痛。\n回复已就绪。"
+                ),
+            ]
+
+        def get_accessible_text(self) -> str:
+            self.commands.append(("get_accessible_text", None))
+            if self.visible_texts:
+                return self.visible_texts.pop(0)
+            return "# 门诊记录单\n【主诉】腹痛。\n【现病史】患者反复腹痛。\n回复已就绪。"
+
+    automation = RetryInvalidAutomation()
+    session = VisualNotebookLMSession(
+        display=":1",
+        screenshots_dir=tmp_path / "screenshots",
+        downloads_dir=tmp_path / "downloads",
+        notebooklm_url="https://notebooklm.google.com",
+        automation=automation,
+        delay_seconds=0,
+    )
+    session.last_research_prompt = prompt
+    monkeypatch.setattr(visual_adapter.time, "sleep", lambda seconds: None)
+
+    session.wait_for_research()
+
+    assert ("paste_text", prompt) in automation.commands
+    assert ("screenshot", tmp_path / "screenshots" / "wait_for_research.png") in automation.commands
+
+
 def test_wait_for_slide_deck_waits_until_ready_message_appears(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1602,11 +2031,14 @@ def test_save_results_downloads_powerpoint_from_presentation_menu(tmp_path: Path
     downloads = tmp_path / "downloads"
 
     class DownloadAutomation(FakeAutomation):
-        def click(self, x: int, y: int) -> None:
-            super().click(x, y)
-            if (x, y) == (1798, 514):
-                downloads.mkdir(parents=True, exist_ok=True)
-                (downloads / "deck.pptx").write_bytes(b"pptx")
+        def download_presentation(self) -> None:
+            self.commands.append(("download_presentation", None))
+            downloads.mkdir(parents=True, exist_ok=True)
+            (downloads / "deck.pptx").write_bytes(b"pptx")
+
+        def copy_selection(self) -> str:
+            self.commands.append(("copy_selection", None))
+            return "https://notebooklm.google.com"
 
     automation = DownloadAutomation("页面噪音\n这是一份为您梳理的纯净版门诊记录单。\n主诉：腹痛。")
     session = VisualNotebookLMSession(
@@ -1625,12 +2057,67 @@ def test_save_results_downloads_powerpoint_from_presentation_menu(tmp_path: Path
     assert (tmp_path / "result" / "research.md").read_text(encoding="utf-8") == "门诊记录单\n主诉：腹痛。\n"
     assert tmp_path / "result" / "deck.pptx" in artifacts.paths
     assert (tmp_path / "result" / "deck.pptx").read_bytes() == b"pptx"
-    page_body_index = automation.commands.index(("click", (900, 500)))
-    select_all_index = automation.commands.index(("hotkey", ("ctrl", "a")))
-    copy_index = automation.commands.index(("copy_selection", None))
-    menu_index = automation.commands.index(("click", (1863, 401)))
-    download_index = automation.commands.index(("click", (1798, 514)))
-    assert page_body_index < select_all_index < copy_index < menu_index < download_index
+    assert ("hotkey", ("ctrl", "a")) not in automation.commands
+    assert ("copy_selection", None) not in automation.commands
+    assert ("download_presentation", None) in automation.commands
+    assert ("click", (1863, 401)) not in automation.commands
+    assert ("click", (1798, 514)) not in automation.commands
+
+
+def test_desktop_download_presentation_uses_powerpoint_menu() -> None:
+    class CdpAutomation(DesktopAutomation):
+        def __init__(self) -> None:
+            super().__init__(
+                display=":1",
+                remote_debugging_port=9222,
+                downloads_dir=Path("/tmp/downloads"),
+            )
+            self.calls: list[tuple[str, dict | None]] = []
+
+        def _find_cdp_target(self) -> dict:
+            return {"webSocketDebuggerUrl": "ws://127.0.0.1/devtools/page/1"}
+
+        def _get_latest_presentation_download_url(self, websocket_url: str) -> str:
+            assert websocket_url == "ws://127.0.0.1/devtools/page/1"
+            return "https://contribution.usercontent.google.com/download?filename=deck.pptx"
+
+        def _cdp_call(self, websocket_url: str, method: str, params: dict | None = None) -> dict:
+            self.calls.append((method, params))
+            return {"result": {}}
+
+    automation = CdpAutomation()
+
+    automation.download_presentation()
+
+    assert ("Page.enable", {}) in automation.calls
+    assert (
+        "Page.setDownloadBehavior",
+        {"behavior": "allow", "downloadPath": "/tmp/downloads"},
+    ) in automation.calls
+    assert (
+        "Page.navigate",
+        {"url": "https://contribution.usercontent.google.com/download?filename=deck.pptx"},
+    ) in automation.calls
+
+
+def test_extract_presentation_download_url_from_list_artifacts_body() -> None:
+    body = """)]}'
+
+123
+[["wrb.fr","gArtLc","[[[\\"artifact-1\\",\\"Deck\\",8,null,null,null,null,null,null,null,null,null,null,null,null,null,null,[[null,\\"zh-Hans\\"],\\"Deck\\",[],\\"https://contribution.usercontent.google.com/download?c=pdf&filename=Deck.pdf\\",\\"https://contribution.usercontent.google.com/download?c=ppt&filename=Deck.pptx\\"]]]]"]]
+"""
+
+    assert (
+        extract_presentation_download_url(body)
+        == "https://contribution.usercontent.google.com/download?c=ppt&filename=Deck.pptx"
+    )
+
+
+def test_desktop_download_presentation_uses_existing_powerpoint_menu_before_reclicking() -> None:
+    expression = DesktopAutomation(":1", remote_debugging_port=9222)._download_presentation_expression()
+
+    assert "existingPowerPointItem" in expression
+    assert expression.index("existingPowerPointItem") < expression.index("toolbarMenu.click")
 
 
 def test_save_results_returns_to_studio_list_before_opening_presentation_menu(tmp_path: Path) -> None:
@@ -1731,6 +2218,53 @@ def test_find_cdp_target_prefers_focused_notebooklm_tab(monkeypatch) -> None:
     target = automation._find_cdp_target()
 
     assert target["url"] == "https://notebooklm.google.com/notebook/active"
+
+
+def test_find_cdp_target_prefers_ready_notebooklm_tab_over_blank_tab(monkeypatch) -> None:
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                [
+                    {
+                        "type": "page",
+                        "url": "https://notebooklm.google.com/notebook/ready",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/ready",
+                    },
+                    {
+                        "type": "page",
+                        "url": "https://notebooklm.google.com/",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/page/blank",
+                    },
+                ]
+            ).encode("utf-8")
+
+    class FakeOpener:
+        def open(self, url: str, timeout: int) -> FakeResponse:
+            return FakeResponse()
+
+    automation = DesktopAutomation(":1", remote_debugging_port=9222)
+
+    def fake_cdp_call(websocket_url: str, method: str, params: dict | None = None) -> dict:
+        expression = (params or {}).get("expression", "")
+        if expression == "document.hasFocus()":
+            return {"result": {"result": {"value": False}}}
+        if "innerText" in expression:
+            length = 0 if websocket_url.endswith("/blank") else 42
+            return {"result": {"result": {"value": length}}}
+        raise AssertionError(f"unexpected CDP call: {method} {params}")
+
+    monkeypatch.setattr(visual_adapter, "build_opener", lambda proxy_handler: FakeOpener())
+    monkeypatch.setattr(automation, "_cdp_call", fake_cdp_call)
+
+    target = automation._find_cdp_target()
+
+    assert target["url"] == "https://notebooklm.google.com/notebook/ready"
 
 
 def test_focus_chrome_retries_until_window_appears(monkeypatch) -> None:

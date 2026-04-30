@@ -24,6 +24,44 @@ from app.worker.rpa.base import RpaArtifacts, RpaError
 CLINIC_RECORD_ANSWER_MARKER = "这是一份为您梳理的纯净版门诊记录单"
 
 
+def extract_presentation_download_url(batchexecute_body: str) -> str | None:
+    for line in batchexecute_body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("["):
+            continue
+        try:
+            rows = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 3 or row[0] != "wrb.fr" or row[1] != "gArtLc":
+                continue
+            try:
+                payload = json.loads(row[2])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            for value in _walk_json_strings(payload):
+                if "contribution.usercontent.google.com/download" in value and ".pptx" in value:
+                    return value
+    return None
+
+
+def _walk_json_strings(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        strings: list[str] = []
+        for item in value:
+            strings.extend(_walk_json_strings(item))
+        return strings
+    if isinstance(value, dict):
+        strings = []
+        for item in value.values():
+            strings.extend(_walk_json_strings(item))
+        return strings
+    return []
+
+
 def extract_clinic_record_markdown(page_text: str, prompt: str) -> str:
     candidate = _candidate_clinic_record_text(page_text, prompt)
     llm_result = _extract_clinic_record_with_llm(candidate, prompt)
@@ -405,15 +443,64 @@ def _bold_diagnosis(line: str) -> str:
     return f"**{diagnosis}**"
 
 
-def _research_result_is_ready(visible_text: str) -> bool:
-    if re.search(r"(Deep|Fast) Research[^\n]*(已完成[！!]|completed)", visible_text, re.IGNORECASE):
+INVALID_RESEARCH_ANSWER_MARKERS = ("系统无法回答", "还没有添加任何来源", "请先上传")
+
+
+def _research_result_is_invalid(visible_text: str, prompt: str = "") -> bool:
+    answer_text = _research_answer_text(visible_text, prompt)
+    tail_text = _research_tail_text(visible_text, prompt)
+    has_invalid_marker = any(
+        marker in answer_text or marker in tail_text for marker in INVALID_RESEARCH_ANSWER_MARKERS
+    )
+    return "回复已就绪" in tail_text and has_invalid_marker
+
+
+def _research_result_is_ready(visible_text: str, prompt: str = "") -> bool:
+    answer_text = _research_answer_text(visible_text, prompt)
+    if _research_result_is_invalid(visible_text, prompt):
+        return False
+    compact_answer = re.sub(r"\s+", "", answer_text)
+    if len(compact_answer) >= 50 and re.search(
+        r"(门诊/诊疗记录单|门诊记录单|诊疗记录单).{0,4000}(主诉|现病史|诊断|辅助检查|诊疗经过|处理意见|诊疗诉求)",
+        answer_text,
+        re.S,
+    ):
         return True
-    if CLINIC_RECORD_ANSWER_MARKER in visible_text:
+    if re.search(r"(Deep|Fast) Research[^\n]*(已完成[！!]|completed)", answer_text, re.IGNORECASE):
         return True
+    if CLINIC_RECORD_ANSWER_MARKER in answer_text:
+        return True
+    if "回复已就绪" in answer_text and re.search(
+        r"(门诊记录单|【主诉】|主诉[：:]).{0,3000}(【现病史】|现病史[：:])",
+        answer_text,
+        re.S,
+    ):
+        return True
+    if "回复已就绪" in answer_text and re.search(
+        r"(初步诊断|诊断|辅助检查).{0,3000}(诊疗|治疗|诉求|用药|拟解决问题)",
+        answer_text,
+        re.S,
+    ):
+        return True
+    if "回复已就绪" in answer_text:
+        if len(compact_answer) >= 120 and re.search(r"(患者|手术|检查|诊断|治疗|肿瘤|胆|肝|胰)", answer_text):
+            return True
     return re.search(
         r"(一份为您[^\n]{0,80}纯净版门诊记录单|为您梳理的[^\n]{0,80}纯净版门诊记录单|已为您整理出一份[^\n]{0,120}门诊记录单|纯净版门诊记录单(?:如下)?[：:]\s*\n\s*门诊记录单)",
-        visible_text,
+        answer_text,
     ) is not None
+
+
+def _research_answer_text(visible_text: str, prompt: str = "") -> str:
+    if prompt and prompt in visible_text:
+        return _candidate_clinic_record_text(visible_text, prompt)
+    return visible_text
+
+
+def _research_tail_text(visible_text: str, prompt: str = "") -> str:
+    if prompt and prompt in visible_text:
+        return visible_text.rsplit(prompt, 1)[1]
+    return visible_text
 
 
 @dataclass(frozen=True)
@@ -434,7 +521,7 @@ class VisualCoordinates:
     deep_research: tuple[int, int] = (160, 376)
     web_search_submit: tuple[int, int] = (447, 310)
     chat_prompt_input: tuple[int, int] = (900, 1143)
-    slide_deck: tuple[int, int] = (1650, 238)
+    slide_deck: tuple[int, int] = (1662, 193)
     settings_button: tuple[int, int] = (1706, 203)
     output_language_menu: tuple[int, int] = (1726, 394)
     output_language_dropdown: tuple[int, int] = (1392, 553)
@@ -447,9 +534,15 @@ class VisualCoordinates:
 
 
 class DesktopAutomation:
-    def __init__(self, display: str, remote_debugging_port: int | None = None) -> None:
+    def __init__(
+        self,
+        display: str,
+        remote_debugging_port: int | None = None,
+        downloads_dir: Path | None = None,
+    ) -> None:
         self.display = display
         self.remote_debugging_port = remote_debugging_port
+        self.downloads_dir = downloads_dir
         self._cdp_ids = count(1)
 
     def focus_chrome(self, timeout_seconds: float = 15.0) -> None:
@@ -521,11 +614,14 @@ class DesktopAutomation:
         target = self._find_cdp_target()
         websocket_url = target["webSocketDebuggerUrl"]
         paths = [str(path.resolve()) for path in files]
-        try:
-            self._upload_files_with_file_chooser_intercept(websocket_url, paths)
-            return
-        except RpaError:
-            pass
+        last_intercept_error: RpaError | None = None
+        for _ in range(3):
+            try:
+                self._upload_files_with_file_chooser_intercept(websocket_url, paths)
+                return
+            except RpaError as error:
+                last_intercept_error = error
+                time.sleep(0.5)
         file_input = self._find_cdp_file_input(websocket_url)
         self._cdp_call(websocket_url, "DOM.setFileInputFiles", {"objectId": file_input, "files": paths})
         self._cdp_call(
@@ -547,18 +643,21 @@ class DesktopAutomation:
             raise RpaError("Chrome DevTools is required for direct Deep Research selection")
         target = self._find_cdp_target()
         websocket_url = target["webSocketDebuggerUrl"]
-        self._click_cdp_text(websocket_url, "Fast Research")
-        last_error: RpaError | None = None
-        for _ in range(10):
-            try:
-                self._click_cdp_text(websocket_url, "Deep Research")
-                return
-            except RpaError as error:
-                last_error = error
-                time.sleep(0.2)
-        if last_error is not None:
-            raise last_error
-        raise RpaError("Chrome DevTools text target was not found: Deep Research")
+        self._cdp_call(websocket_url, "Page.bringToFront", {})
+        response = self._cdp_call(
+            websocket_url,
+            "Runtime.evaluate",
+            {
+                "expression": self._select_deep_research_expression(),
+                "userGesture": True,
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+        value = response.get("result", {}).get("result", {}).get("value")
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            reason = value.get("reason") if isinstance(value, dict) else "unknown error"
+            raise RpaError(f"Chrome DevTools Deep Research selection failed: {reason}")
 
     def submit_chat_prompt(self, prompt: str) -> None:
         if self.remote_debugging_port is None:
@@ -578,6 +677,175 @@ class DesktopAutomation:
         if not isinstance(value, dict) or value.get("ok") is not True:
             reason = value.get("reason") if isinstance(value, dict) else "unknown error"
             raise RpaError(f"Chrome DevTools chat prompt submit failed: {reason}")
+
+    def click_text(self, text: str) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct text click")
+        target = self._find_cdp_target()
+        self._click_cdp_text(target["webSocketDebuggerUrl"], text)
+
+    def click_new_notebook(self) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct new notebook click")
+        target = self._find_cdp_target()
+        response = self._cdp_call(
+            target["webSocketDebuggerUrl"],
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(() => {"
+                    "const elements = Array.from(document.querySelectorAll('button, [role=\"button\"]'));"
+                    "const visible = (element) => {"
+                    "const rect = element.getBoundingClientRect();"
+                    "const style = window.getComputedStyle(element);"
+                    "return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && "
+                    "style.display !== 'none';"
+                    "};"
+                    "const enabled = (element) => !element.disabled && element.getAttribute('aria-disabled') !== 'true';"
+                    "const textOf = (element) => (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim();"
+                    "const score = (element) => {"
+                    "const text = textOf(element);"
+                    "const rect = element.getBoundingClientRect();"
+                    "if (!visible(element) || !enabled(element)) return -1;"
+                    "if (text.includes('创建笔记本')) return 1000 - rect.y;"
+                    "if (text.includes('新建') && rect.x > window.innerWidth * 0.45) return 900 - rect.y;"
+                    "if (text === '新建' || text.endsWith(' 新建')) return 800 - rect.y;"
+                    "if (text.includes('New') && rect.x > window.innerWidth * 0.45) return 700 - rect.y;"
+                    "return -1;"
+                    "};"
+                    "const candidates = elements.map((element) => ({ element, score: score(element) }))"
+                    ".filter((candidate) => candidate.score >= 0)"
+                    ".sort((left, right) => right.score - left.score);"
+                    "if (!candidates.length) return { ok: false, reason: 'new notebook button was not found' };"
+                    "candidates[0].element.click();"
+                    "return { ok: true, text: textOf(candidates[0].element) };"
+                    "})()"
+                ),
+                "userGesture": True,
+                "returnByValue": True,
+            },
+        )
+        value = response.get("result", {}).get("result", {}).get("value")
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            reason = value.get("reason") if isinstance(value, dict) else "unknown error"
+            raise RpaError(f"Chrome DevTools new notebook click failed: {reason}")
+
+    def start_presentation_generation(self) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct presentation generation")
+        target = self._find_cdp_target()
+        websocket_url = target["webSocketDebuggerUrl"]
+        self._cdp_call(websocket_url, "Page.bringToFront", {})
+        response = self._cdp_call(
+            websocket_url,
+            "Runtime.evaluate",
+            {
+                "expression": self._start_presentation_generation_expression(),
+                "userGesture": True,
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+        value = response.get("result", {}).get("result", {}).get("value")
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            reason = value.get("reason") if isinstance(value, dict) else "unknown error"
+            raise RpaError(f"Chrome DevTools presentation generation failed: {reason}")
+
+    def download_presentation(self) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct presentation download")
+        target = self._find_cdp_target()
+        websocket_url = target["webSocketDebuggerUrl"]
+        self._cdp_call(websocket_url, "Page.enable", {})
+        if self.downloads_dir is not None:
+            self.downloads_dir.mkdir(parents=True, exist_ok=True)
+            self._cdp_call(
+                websocket_url,
+                "Page.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": str(self.downloads_dir)},
+            )
+        presentation_url = self._get_latest_presentation_download_url(websocket_url)
+        self._cdp_call(websocket_url, "Page.navigate", {"url": presentation_url})
+
+    def _download_presentation_from_menu(self) -> None:
+        if self.remote_debugging_port is None:
+            raise RpaError("Chrome DevTools is required for direct presentation download")
+        target = self._find_cdp_target()
+        response = self._cdp_call(
+            target["webSocketDebuggerUrl"],
+            "Runtime.evaluate",
+            {
+                "expression": self._download_presentation_expression(),
+                "userGesture": True,
+                "returnByValue": True,
+                "awaitPromise": True,
+            },
+        )
+        value = response.get("result", {}).get("result", {}).get("value")
+        if not isinstance(value, dict) or value.get("ok") is not True:
+            reason = value.get("reason") if isinstance(value, dict) else "unknown error"
+            raise RpaError(f"Chrome DevTools presentation download failed: {reason}")
+
+    def _get_latest_presentation_download_url(self, websocket_url: str, timeout_seconds: float = 30.0) -> str:
+        parsed = urlparse(websocket_url)
+        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        if parsed.scheme == "wss":
+            raise RpaError("Secure Chrome DevTools WebSocket is not supported")
+        sock = socket.create_connection((parsed.hostname or "127.0.0.1", port), timeout=5)
+        sock.settimeout(0.5)
+        pending_bodies: dict[int, str] = {}
+        tracked_requests: set[str] = set()
+        try:
+            self._websocket_handshake(sock, parsed)
+            self._send_socket_cdp_command(sock, "Network.enable")
+            self._send_socket_cdp_command(sock, "Page.enable")
+            self._send_socket_cdp_command(sock, "Page.reload", {"ignoreCache": False})
+            deadline = time.monotonic() + timeout_seconds
+            while time.monotonic() <= deadline:
+                try:
+                    message = self._websocket_recv_json(sock)
+                except socket.timeout:
+                    continue
+                method = message.get("method")
+                if method == "Network.requestWillBeSent":
+                    params = message.get("params", {})
+                    request = params.get("request", {})
+                    request_id = params.get("requestId")
+                    url = request.get("url", "")
+                    post_data = request.get("postData", "")
+                    if isinstance(request_id, str) and "batchexecute" in url and "gArtLc" in f"{url}{post_data}":
+                        tracked_requests.add(request_id)
+                elif method == "Network.loadingFinished":
+                    request_id = message.get("params", {}).get("requestId")
+                    if request_id in tracked_requests:
+                        command_id = self._send_socket_cdp_command(
+                            sock,
+                            "Network.getResponseBody",
+                            {"requestId": request_id},
+                        )
+                        pending_bodies[command_id] = request_id
+                elif isinstance(message.get("id"), int) and message["id"] in pending_bodies:
+                    pending_bodies.pop(message["id"], None)
+                    body = message.get("result", {}).get("body", "")
+                    if isinstance(body, str):
+                        presentation_url = extract_presentation_download_url(body)
+                        if presentation_url:
+                            return presentation_url
+            raise RpaError("PowerPoint download URL did not appear in NotebookLM artifact data")
+        finally:
+            sock.close()
+
+    def _send_socket_cdp_command(self, sock: socket.socket, method: str, params: dict | None = None) -> int:
+        request_id = next(self._cdp_ids)
+        self._websocket_send_json(
+            sock,
+            {
+                "id": request_id,
+                "method": method,
+                "params": params or {},
+            },
+        )
+        return request_id
 
     def get_current_url(self) -> str:
         if self.remote_debugging_port is not None:
@@ -646,16 +914,32 @@ class DesktopAutomation:
         sock = socket.create_connection((parsed.hostname or "127.0.0.1", port), timeout=5)
         try:
             self._websocket_handshake(sock, parsed)
+            self._send_cdp_command(sock, "Page.bringToFront", {})
             self._send_cdp_command(sock, "Page.enable")
             self._send_cdp_command(sock, "Page.setInterceptFileChooserDialog", {"enabled": True})
-            click_request_id = self._websocket_send_cdp_command(
+            rect_response = self._send_cdp_command(
                 sock,
                 "Runtime.evaluate",
                 {
-                    "expression": self._upload_file_button_click_expression(),
-                    "userGesture": True,
+                    "expression": self._upload_file_button_rect_expression(),
                     "returnByValue": True,
                 },
+            )
+            button_rect = rect_response.get("result", {}).get("result", {}).get("value")
+            if not isinstance(button_rect, dict):
+                raise RpaError("NotebookLM upload file button was not found")
+            x = float(button_rect["x"]) + float(button_rect["width"]) / 2
+            y = float(button_rect["y"]) + float(button_rect["height"]) / 2
+            self._send_cdp_command(sock, "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+            self._send_cdp_command(
+                sock,
+                "Input.dispatchMouseEvent",
+                {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1},
+            )
+            click_request_id = self._websocket_send_cdp_command(
+                sock,
+                "Input.dispatchMouseEvent",
+                {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1},
             )
             backend_node_id = self._wait_for_file_chooser_backend_node(sock, click_request_id)
             self._send_cdp_command(
@@ -666,16 +950,53 @@ class DesktopAutomation:
         finally:
             sock.close()
 
-    def _upload_file_button_click_expression(self) -> str:
+    def _upload_file_button_rect_expression(self) -> str:
         return (
             "(() => {"
             "const buttons = Array.from(document.querySelectorAll('button, [role=\"button\"]'));"
             "const button = buttons.find((element) => "
             "(element.innerText || element.textContent || '').includes('上传文件')"
             ");"
-            "if (!button) return false;"
-            "button.click();"
-            "return true;"
+            "if (!button) return null;"
+            "const rect = button.getBoundingClientRect();"
+            "return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };"
+            "})()"
+        )
+
+    def _select_deep_research_expression(self) -> str:
+        return (
+            "(async () => {"
+            "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));"
+            "const visible = (element) => {"
+            "const rect = element.getBoundingClientRect();"
+            "const style = window.getComputedStyle(element);"
+            "return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+            "};"
+            "const enabled = (element) => !element.disabled && element.getAttribute('aria-disabled') !== 'true';"
+            "const textOf = (element) => (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim();"
+            "const controls = () => Array.from(document.querySelectorAll("
+            "'button, [role=\"button\"], [role=\"combobox\"], [aria-haspopup], mat-select, mat-option, [role=\"option\"], [role=\"menuitem\"]'"
+            ")).filter((element) => visible(element) && enabled(element));"
+            "const bodyText = document.body ? document.body.innerText : '';"
+            "if (bodyText.includes('Deep Research') && !bodyText.includes('Fast Research')) return { ok: true, alreadySelected: true };"
+            "const dropdown = controls().filter((element) => {"
+            "const text = textOf(element);"
+            "const rect = element.getBoundingClientRect();"
+            "return (text.includes('Fast Research') || text.includes('Deep Research')) && rect.x < window.innerWidth * 0.45;"
+            "}).sort((left, right) => left.getBoundingClientRect().y - right.getBoundingClientRect().y)[0];"
+            "if (!dropdown) return { ok: false, reason: 'research type dropdown was not found' };"
+            "dropdown.click();"
+            "await sleep(500);"
+            "const deepOption = controls().filter((element) => textOf(element).includes('Deep Research'))"
+            ".sort((left, right) => {"
+            "const leftRect = left.getBoundingClientRect();"
+            "const rightRect = right.getBoundingClientRect();"
+            "return (leftRect.width * leftRect.height) - (rightRect.width * rightRect.height);"
+            "})[0];"
+            "if (!deepOption) return { ok: false, reason: 'Deep Research option was not found' };"
+            "deepOption.click();"
+            "await sleep(300);"
+            "return { ok: true };"
             "})()"
         )
 
@@ -725,6 +1046,81 @@ class DesktopAutomation:
             "if (!button) return { ok: false, reason: 'chat submit button was not found', value: textarea.value };"
             "button.click();"
             "return { ok: true, submitted: 'button', value: textarea.value };"
+            "})()"
+        )
+
+    def _download_presentation_expression(self) -> str:
+        return (
+            "(async () => {"
+            "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));"
+            "const visible = (element) => {"
+            "const rect = element.getBoundingClientRect();"
+            "return rect.width > 0 && rect.height > 0;"
+            "};"
+            "const enabled = (element) => !element.disabled && element.getAttribute('aria-disabled') !== 'true';"
+            "const textOf = (element) => (element.innerText || element.textContent || '').trim();"
+            "const findPowerPointItem = () => Array.from(document.querySelectorAll('[role=\"menuitem\"], button')).find((element) => {"
+            "const text = textOf(element);"
+            "return visible(element) && enabled(element) && (text.includes('PowerPoint') || text.includes('.pptx'));"
+            "});"
+            "const existingPowerPointItem = findPowerPointItem();"
+            "if (existingPowerPointItem) {"
+            "existingPowerPointItem.click();"
+            "return { ok: true, menuAlreadyOpen: true };"
+            "}"
+            "const readyItems = Array.from(document.querySelectorAll('.artifact-item-button')).filter((element) => {"
+            "const text = textOf(element);"
+            "return visible(element) && !text.includes('正在生成') && "
+            "(text.includes('tablet') || text.includes('演示文稿') || text.includes('个来源'));"
+            "});"
+            "if (readyItems.length) {"
+            "readyItems.sort((left, right) => left.getBoundingClientRect().y - right.getBoundingClientRect().y)[0].click();"
+            "await sleep(500);"
+            "}"
+            "const toolbarMenu = Array.from(document.querySelectorAll('button')).filter((button) => {"
+            "const rect = button.getBoundingClientRect();"
+            "return visible(button) && enabled(button) && textOf(button).includes('more_horiz') && "
+            "rect.x > window.innerWidth * 0.75 && rect.y < 220;"
+            "}).sort((left, right) => right.getBoundingClientRect().x - left.getBoundingClientRect().x)[0];"
+            "if (!toolbarMenu) return { ok: false, reason: 'presentation menu button was not found' };"
+            "toolbarMenu.click();"
+            "await sleep(300);"
+            "const powerPointItem = findPowerPointItem();"
+            "if (!powerPointItem) return { ok: false, reason: 'PowerPoint download menu item was not found' };"
+            "powerPointItem.click();"
+            "return { ok: true };"
+            "})()"
+        )
+
+    def _start_presentation_generation_expression(self) -> str:
+        return (
+            "(async () => {"
+            "const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));"
+            "const visible = (element) => {"
+            "const rect = element.getBoundingClientRect();"
+            "const style = window.getComputedStyle(element);"
+            "return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+            "};"
+            "const enabled = (element) => !element.disabled && element.getAttribute('aria-disabled') !== 'true';"
+            "const textOf = (element) => (element.innerText || element.textContent || '').replace(/\\s+/g, ' ').trim();"
+            "const elements = Array.from(document.querySelectorAll('.artifact-item-button, button, [role=\"button\"]'));"
+            "const candidates = elements.filter((element) => {"
+            "const text = textOf(element);"
+            "return visible(element) && enabled(element) && text.includes('演示文稿') && !text.includes('正在生成');"
+            "}).map((element) => {"
+            "const rect = element.getBoundingClientRect();"
+            "const text = textOf(element);"
+            "let score = 0;"
+            "if (rect.x > window.innerWidth * 0.55) score += 1000;"
+            "if (text.includes('tablet')) score += 100;"
+            "if (text.includes('chevron_forward')) score += 50;"
+            "score -= rect.y / 1000;"
+            "return { element, score, text };"
+            "}).sort((left, right) => right.score - left.score);"
+            "if (!candidates.length) return { ok: false, reason: 'presentation button was not found' };"
+            "candidates[0].element.click();"
+            "await sleep(500);"
+            "return { ok: true, text: candidates[0].text };"
             "})()"
         )
 
@@ -855,7 +1251,10 @@ class DesktopAutomation:
             if target.get("type") == "page" and "notebooklm.google.com" in target.get("url", "")
         ]
         for target in notebooklm_targets:
-            if self._target_has_focus(target):
+            if self._target_has_focus(target) and self._target_body_text_length(target) > 0:
+                return target
+        for target in reversed(notebooklm_targets):
+            if self._target_body_text_length(target) > 0:
                 return target
         if notebooklm_targets:
             return notebooklm_targets[-1]
@@ -877,6 +1276,24 @@ class DesktopAutomation:
         except RpaError:
             return False
         return response.get("result", {}).get("result", {}).get("value") is True
+
+    def _target_body_text_length(self, target: dict) -> int:
+        websocket_url = target.get("webSocketDebuggerUrl")
+        if not isinstance(websocket_url, str):
+            return 0
+        try:
+            response = self._cdp_call(
+                websocket_url,
+                "Runtime.evaluate",
+                {
+                    "expression": "(document.body && document.body.innerText || '').trim().length",
+                    "returnByValue": True,
+                },
+            )
+        except RpaError:
+            return 0
+        value = response.get("result", {}).get("result", {}).get("value")
+        return value if isinstance(value, int) else 0
 
     def _cdp_call(self, websocket_url: str, method: str, params: dict | None = None) -> dict:
         request_id = next(self._cdp_ids)
@@ -1092,7 +1509,11 @@ class VisualNotebookLMSession:
         self.screenshots_dir = screenshots_dir
         self.downloads_dir = downloads_dir
         self.notebooklm_url = notebooklm_url
-        self.automation = automation or DesktopAutomation(display, remote_debugging_port=remote_debugging_port)
+        self.automation = automation or DesktopAutomation(
+            display,
+            remote_debugging_port=remote_debugging_port,
+            downloads_dir=downloads_dir,
+        )
         self.coordinates = coordinates
         self.delay_seconds = delay_seconds
         self.record_extractor = record_extractor or extract_clinic_record_markdown
@@ -1126,7 +1547,7 @@ class VisualNotebookLMSession:
                 self.automation.press("Escape")
                 self.automation.press("Escape")
                 self._sleep()
-                self._click(create_button)
+                self._click_new_notebook(create_button)
                 self.automation.press("Escape")
                 self._sleep()
                 notebook_url = self._wait_for_notebook_url(timeout_seconds=60.0, ignored_url=current_url)
@@ -1171,7 +1592,8 @@ class VisualNotebookLMSession:
         uploaded_directly = False
         for _ in range(2):
             if not self._add_source_dialog_is_open(visible_text):
-                self._click(self.coordinates.add_source)
+                if not self._click_text_directly("添加来源"):
+                    self._click(self.coordinates.add_source)
                 self._sleep()
             self._select_add_source_deep_research()
             if self._upload_files_directly(uploadable):
@@ -1230,7 +1652,7 @@ class VisualNotebookLMSession:
                 visible_text = self._read_visible_text()
             except RpaError:
                 visible_text = ""
-            if prompt in visible_text or _research_result_is_ready(visible_text):
+            if prompt in visible_text or _research_result_is_ready(visible_text, prompt):
                 break
             if attempt < 2:
                 self.automation.press("Escape")
@@ -1239,11 +1661,20 @@ class VisualNotebookLMSession:
     def wait_for_research(self) -> None:
         deadline = time.monotonic() + 2700
         last_text = ""
+        invalid_retries = 0
         while time.monotonic() <= deadline:
             last_text = self._read_visible_text()
-            if _research_result_is_ready(last_text):
+            if _research_result_is_ready(last_text, self.last_research_prompt):
                 self._screenshot("wait_for_research")
                 return
+            if _research_result_is_invalid(last_text, self.last_research_prompt):
+                if invalid_retries >= 2:
+                    raise RpaError(f"Deep Research returned invalid answer: {last_text[:120]}")
+                invalid_retries += 1
+                self.automation.press("Escape")
+                self._sleep_at_least(3.0)
+                self.start_deep_research(self.last_research_prompt)
+                self._sleep_at_least(10.0)
             time.sleep(max(self.delay_seconds, 5.0))
         raise RpaError(f"Deep Research did not complete: {last_text[:120]}")
 
@@ -1252,7 +1683,8 @@ class VisualNotebookLMSession:
         if language == "简体中文":
             self._set_output_language_to_simplified_chinese()
         self._sleep()
-        self._click(self.coordinates.slide_deck)
+        if not self._start_presentation_generation_directly() and not self._click_text_directly("演示文稿"):
+            self._click(self.coordinates.slide_deck)
         self._screenshot("generate_slide_deck")
 
     def wait_for_slide_deck(self) -> None:
@@ -1273,19 +1705,16 @@ class VisualNotebookLMSession:
         self.automation.focus_chrome()
         self.automation.press("Escape")
         self._sleep()
-        self._click(self.coordinates.studio_breadcrumb)
-        self._sleep()
-        self._click(self.coordinates.page_body)
-        self._sleep()
-        self.automation.hotkey("ctrl", "a")
-        self._sleep()
-        copied_text = self.automation.copy_selection()
+        copied_text = self._copy_result_page_text()
         extracted_record = self.record_extractor(copied_text, self.last_research_prompt)
         research_path = result_dir / "research.md"
         research_path.write_text(extracted_record.rstrip() + "\n", encoding="utf-8")
-        self._click(self.coordinates.presentation_item_menu)
-        self._sleep()
-        self._click(self.coordinates.download_powerpoint)
+        if not self._download_presentation_directly():
+            self._click(self.coordinates.studio_breadcrumb)
+            self._sleep()
+            self._click(self.coordinates.presentation_item_menu)
+            self._sleep()
+            self._click(self.coordinates.download_powerpoint)
         downloaded = self._wait_for_new_downloads(existing_downloads)
         result_downloads = [self._copy_download_to_result(path, result_dir) for path in downloaded]
         screenshot_path = result_dir / "screenshots" / "final.png"
@@ -1315,6 +1744,16 @@ class VisualNotebookLMSession:
     def _click(self, point: tuple[int, int]) -> None:
         self.automation.click(point[0], point[1])
 
+    def _click_new_notebook(self, fallback_point: tuple[int, int]) -> None:
+        click_new_notebook = getattr(self.automation, "click_new_notebook", None)
+        if callable(click_new_notebook):
+            try:
+                click_new_notebook()
+                return
+            except RpaError:
+                pass
+        self._click(fallback_point)
+
     def _screenshot(self, name: str) -> None:
         self.automation.screenshot(self.screenshots_dir / f"{name}.png")
 
@@ -1326,7 +1765,7 @@ class VisualNotebookLMSession:
         if self.delay_seconds > 0:
             time.sleep(max(self.delay_seconds, minimum_seconds))
 
-    def _wait_for_new_downloads(self, existing_downloads: set[Path], timeout_seconds: float = 60.0) -> list[Path]:
+    def _wait_for_new_downloads(self, existing_downloads: set[Path], timeout_seconds: float = 600.0) -> list[Path]:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() <= deadline:
             downloaded = [
@@ -1402,6 +1841,48 @@ class VisualNotebookLMSession:
             return False
         return True
 
+    def _download_presentation_directly(self) -> bool:
+        download_presentation = getattr(self.automation, "download_presentation", None)
+        if not callable(download_presentation):
+            return False
+        try:
+            download_presentation()
+        except RpaError:
+            return False
+        return True
+
+    def _start_presentation_generation_directly(self) -> bool:
+        start_presentation_generation = getattr(self.automation, "start_presentation_generation", None)
+        if not callable(start_presentation_generation):
+            return False
+        try:
+            start_presentation_generation()
+        except RpaError:
+            return False
+        return True
+
+    def _click_text_directly(self, text: str) -> bool:
+        click_text = getattr(self.automation, "click_text", None)
+        if not callable(click_text):
+            return False
+        try:
+            click_text(text)
+        except RpaError:
+            return False
+        return True
+
+    def _copy_result_page_text(self) -> str:
+        try:
+            return self._read_visible_text()
+        except RpaError:
+            self._click(self.coordinates.studio_breadcrumb)
+            self._sleep()
+            self._click(self.coordinates.page_body)
+            self._sleep()
+            self.automation.hotkey("ctrl", "a")
+            self._sleep()
+            return self.automation.copy_selection()
+
     def _chat_source_count(self, visible_text: str) -> int:
         if "开始输入" in visible_text:
             visible_text = visible_text.split("开始输入", 1)[1]
@@ -1419,9 +1900,19 @@ class VisualNotebookLMSession:
         if "对话" not in visible_text or "Studio" not in visible_text:
             return False
         chat_panel = visible_text.split("对话", 1)[1].split("Studio", 1)[0]
+        if any(marker in chat_panel for marker in ("正在上传", "正在处理", "Uploading", "Processing")):
+            return False
         if any(marker in chat_panel for marker in ("这些文件", "摘要", "总结", "根据")):
             return True
-        return "Untitled notebook" not in chat_panel and re.search(r"\S.+\n\d+\s*个来源\s*·", chat_panel) is not None
+        if re.search(
+            rf"Untitled notebook\s+{expected_count}\s*个来源\s*·",
+            chat_panel,
+        ):
+            return True
+        return "Untitled notebook" not in chat_panel and re.search(
+            r"\S.+(?:\n|\s)\d+\s*个来源\s*(?:\n\s*)?·",
+            chat_panel,
+        ) is not None
 
     def _slide_deck_is_ready(self, visible_text: str) -> bool:
         if "正在生成演示文稿" in visible_text:
